@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Lyo SaaS - Webhook Forwarder</title>
+</head>
+<body>
+    <h1>🤖 Lyo SaaS Webhook Forwarder</h1>
+    <p>This page forwards WhatsApp webhooks to your production server.</p>
+    
+    <script>
+    // Simple webhook forwarder
+    if (window.location.pathname === '/webhook') {
+        // Get query parameters
+        const params = new URLSearchParams(window.location.search);
+        const mode = params.get('hub.mode');
+        const token = params.get('hub.verify_token');  
+        const challenge = params.get('hub.challenge');
+        
+        // Handle verification
+        if (mode === 'subscribe' && token === 'lyo_verify_2024') {
+            document.body.innerHTML = challenge || 'OK';
+        }
+        
+        // Handle POST webhooks by forwarding to your server
+        if (window.location.hash === '#webhook') {
+            fetch('https://135.181.249.116:8000/webhook', {
+                method: 'POST',
+                body: JSON.stringify(webhook_data),
+                headers: {'Content-Type': 'application/json'}
+            });
+        }
+    }
+    </script>
+</body>
+</html>

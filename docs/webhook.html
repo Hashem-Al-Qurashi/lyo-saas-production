@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Lyo Webhook</title>
+</head>
+<body>
+    <script>
+    // WhatsApp webhook verification
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get('hub.mode');
+    const token = params.get('hub.verify_token');
+    const challenge = params.get('hub.challenge');
+    
+    if (mode === 'subscribe' && token === 'lyo_verify_2024') {
+        document.write(challenge);
+    } else {
+        document.write('Forbidden');
+    }
+    </script>
+</body>
+</html>
