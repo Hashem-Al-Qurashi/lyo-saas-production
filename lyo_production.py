@@ -60,7 +60,18 @@ class LyoProduction:
     """
     
     def __init__(self, openai_api_key: str, business_id: str = "default"):
-        self.client = OpenAI(api_key=openai_api_key)
+        # Support both OpenAI and OpenRouter APIs
+        if openai_api_key.startswith("sk-proj-"):
+            # OpenRouter API key
+            self.client = OpenAI(
+                api_key=openai_api_key,
+                base_url="https://openrouter.ai/api/v1"
+            )
+            print("🔄 Using OpenRouter API")
+        else:
+            # Standard OpenAI API key  
+            self.client = OpenAI(api_key=openai_api_key)
+            print("🤖 Using OpenAI API")
         self.memory = MockMemoryManager()  # Will be Redis+PostgreSQL in production
         self.business_id = business_id
         
@@ -212,9 +223,12 @@ Posizione: {config['location']}
         
         try:
             # Get AI response
+            # Use appropriate model based on API
+            model = "openai/gpt-3.5-turbo" if self.client.base_url and "openrouter" in str(self.client.base_url) else "gpt-3.5-turbo"
+            
             response = await asyncio.to_thread(
                 self.client.chat.completions.create,
-                model="gpt-4-turbo",
+                model=model,
                 messages=messages,
                 temperature=0.8,
                 max_tokens=200
