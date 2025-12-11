@@ -1,0 +1,14 @@
+# WhatsApp Webhook Requirements for Vercel Deployment
+# Python 3.9 runtime
+
+# Core dependencies (minimal for serverless)
+# Note: urllib is built-in, no external dependencies needed for basic webhook
+
+# Optional: For enhanced features (add if needed)
+# requests==2.31.0          # If you prefer requests over urllib
+# python-dotenv==1.0.0      # For local development
+# sentry-sdk==1.40.0        # For error tracking
+# redis==5.0.1              # For caching/queuing (if using Redis)
+
+# The current implementation uses only Python standard library
+# This ensures minimal cold start time and maximum reliability
