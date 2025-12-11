@@ -1,0 +1,17 @@
+{
+  "functions": {
+    "api/webhook.py": {
+      "runtime": "python3.9"
+    }
+  },
+  "routes": [
+    {
+      "src": "/webhook",
+      "dest": "/api/webhook"
+    },
+    {
+      "src": "/",
+      "dest": "/api/webhook"
+    }
+  ]
+}
