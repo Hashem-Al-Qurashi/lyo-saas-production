@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python3 lyo_production.py"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
