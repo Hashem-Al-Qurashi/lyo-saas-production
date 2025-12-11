@@ -1,2 +1,6 @@
-# Minimal requirements for Vercel webhook
-# Uses Python standard library only for maximum reliability
+# Railway Deployment Requirements
+openai>=1.52.0
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-dotenv==1.0.0
+httpx==0.25.2
