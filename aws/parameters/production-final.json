@@ -1,0 +1,30 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "ProjectName", 
+    "ParameterValue": "lyo-saas"
+  },
+  {
+    "ParameterKey": "DatabaseMasterUsername",
+    "ParameterValue": "lyoadmin"
+  },
+  {
+    "ParameterKey": "DatabaseMasterPassword",
+    "ParameterValue": "LyoSaaS2024Production!"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "lyo-saas-440671981955.com"
+  },
+  {
+    "ParameterKey": "OpenAIApiKey",
+    "ParameterValue": "REPLACE_WITH_OPENAI_API_KEY"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": "arn:aws:acm:us-east-1:440671981955:certificate/c406ef8c-df5c-4b76-8954-db1cab81437e"
+  }
+]

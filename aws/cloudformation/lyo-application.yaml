@@ -1,0 +1,456 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lyo SaaS Application Deployment - ECS Service with Auto-scaling'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [staging, production]
+  
+  ProjectName:
+    Type: String
+    Default: lyo-saas
+  
+  InfrastructureStackName:
+    Type: String
+    Description: Name of the infrastructure CloudFormation stack
+    Default: lyo-infrastructure
+  
+  ImageUri:
+    Type: String
+    Description: ECR image URI for the application
+    Default: 'nginx:latest'  # Placeholder - will be updated by CI/CD
+  
+  DesiredCount:
+    Type: Number
+    Default: 2
+    Description: Desired number of ECS tasks
+    
+  TaskCpu:
+    Type: String
+    Default: '512'
+    AllowedValues: ['256', '512', '1024', '2048']
+    Description: CPU units for ECS task (256 = 0.25 vCPU)
+    
+  TaskMemory:
+    Type: String  
+    Default: '1024'
+    AllowedValues: ['512', '1024', '2048', '4096']
+    Description: Memory for ECS task (in MB)
+
+Resources:
+  # ============================================================================
+  # ECS TASK DEFINITION
+  # ============================================================================
+  
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-${Environment}'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: 
+        Fn::ImportValue: !Sub '${InfrastructureStackName}-ECS-ExecutionRole'
+      TaskRoleArn:
+        Fn::ImportValue: !Sub '${InfrastructureStackName}-ECS-TaskRole'
+      ContainerDefinitions:
+        - Name: lyo-app
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: HOST
+              Value: '0.0.0.0'
+            - Name: PORT
+              Value: '8000'
+            - Name: LOG_LEVEL
+              Value: !If [IsProduction, 'INFO', 'DEBUG']
+            - Name: WORKERS
+              Value: '2'
+            - Name: OPENAI_MODEL
+              Value: 'gpt-4-turbo-preview'
+            - Name: OPENAI_TEMPERATURE
+              Value: '0.8'
+            - Name: OPENAI_MAX_TOKENS
+              Value: '500'
+            - Name: REDIS_TTL_HOURS
+              Value: '24'
+            - Name: DB_POOL_MIN_SIZE
+              Value: '2'
+            - Name: DB_POOL_MAX_SIZE
+              Value: '10'
+            - Name: RATE_LIMIT_PER_MINUTE
+              Value: '60'
+            - Name: RATE_LIMIT_PER_HOUR
+              Value: '1000'
+            - Name: TIMEZONE
+              Value: 'Europe/Rome'
+            - Name: CORS_ORIGINS
+              Value: '*'
+            - Name: ALLOWED_HOSTS
+              Value: '*'
+            - Name: BUSINESS_ID
+              Value: 'default_salon'
+            - Name: BUSINESS_NAME
+              Value: 'Salon Bella Vita'
+            - Name: BUSINESS_TYPE
+              Value: 'beauty_salon'
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub
+                - '${SecretsArn}:DATABASE_URL::'
+                - SecretsArn:
+                    Fn::ImportValue: !Sub '${InfrastructureStackName}-Secrets-ARN'
+            - Name: REDIS_URL
+              ValueFrom: !Sub
+                - '${SecretsArn}:REDIS_URL::'
+                - SecretsArn:
+                    Fn::ImportValue: !Sub '${InfrastructureStackName}-Secrets-ARN'
+            - Name: OPENAI_API_KEY
+              ValueFrom: !Sub
+                - '${SecretsArn}:OPENAI_API_KEY::'
+                - SecretsArn:
+                    Fn::ImportValue: !Sub '${InfrastructureStackName}-Secrets-ARN'
+            - Name: SECRET_KEY
+              ValueFrom: !Sub
+                - '${SecretsArn}:SECRET_KEY::'
+                - SecretsArn:
+                    Fn::ImportValue: !Sub '${InfrastructureStackName}-Secrets-ARN'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Sub '/aws/ecs/${ProjectName}-${Environment}'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8000/health || exit 1
+            Interval: 30
+            Timeout: 10
+            Retries: 3
+            StartPeriod: 60
+
+  # ============================================================================
+  # ECS SERVICE
+  # ============================================================================
+  
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - HTTPSListener  # Ensure ALB listener exists
+    Properties:
+      ServiceName: !Sub '${ProjectName}-${Environment}'
+      Cluster:
+        Fn::ImportValue: !Sub '${InfrastructureStackName}-ECS-Cluster'
+      TaskDefinition: !Ref ECSTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - Fn::ImportValue: !Sub '${InfrastructureStackName}-ECS-SecurityGroup'
+          Subnets:
+            - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet1'
+            - Fn::ImportValue: !Sub '${InfrastructureStackName}-PrivateSubnet2'
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: lyo-app
+          ContainerPort: 8000
+          TargetGroupArn:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-TargetGroup-ARN'
+      ServiceTags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-service'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================================
+  # AUTO SCALING
+  # ============================================================================
+  
+  # Auto Scaling Target
+  ServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10  # Scale up to 10 tasks max
+      MinCapacity: 2   # Always keep at least 2 tasks
+      ResourceId: !Sub 'service/${ProjectName}-${Environment}/${ProjectName}-${Environment}'
+      RoleARN: !GetAtt AutoScalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+    DependsOn: ECSService
+
+  # Auto Scaling Policy - CPU
+  ServiceScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-cpu-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Auto Scaling Policy - Memory
+  ServiceScalingPolicyMemory:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-memory-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: 80.0
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Auto Scaling Policy - ALB Request Count
+  ServiceScalingPolicyALB:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-alb-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub
+            - '${LoadBalancerArn}/${TargetGroupArn}'
+            - LoadBalancerArn:
+                Fn::ImportValue: !Sub '${InfrastructureStackName}-ALB-ARN'
+              TargetGroupArn:
+                Fn::ImportValue: !Sub '${InfrastructureStackName}-TargetGroup-ARN'
+        TargetValue: 1000.0  # Scale when > 1000 requests per target per minute
+        ScaleOutCooldown: 300
+        ScaleInCooldown: 300
+
+  # Auto Scaling Role
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSServiceRolePolicy
+
+  # ============================================================================
+  # CLOUDWATCH ALARMS
+  # ============================================================================
+  
+  # High CPU Alarm
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-HighCPU'
+      AlarmDescription: High CPU utilization on ECS service
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !Sub '${ProjectName}-${Environment}'
+        - Name: ClusterName
+          Value:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-ECS-Cluster'
+      AlarmActions:
+        - !Ref SNSTopicArn
+      TreatMissingData: notBreaching
+
+  # High Memory Alarm
+  HighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-HighMemory'
+      AlarmDescription: High memory utilization on ECS service
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !Sub '${ProjectName}-${Environment}'
+        - Name: ClusterName
+          Value:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-ECS-Cluster'
+      AlarmActions:
+        - !Ref SNSTopicArn
+      TreatMissingData: notBreaching
+
+  # Service Unhealthy Alarm
+  UnhealthyTargetsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-UnhealthyTargets'
+      AlarmDescription: Unhealthy targets in load balancer
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-TargetGroup-ARN'
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-ALB-ARN'
+      AlarmActions:
+        - !Ref SNSTopicArn
+      TreatMissingData: notBreaching
+
+  # ============================================================================
+  # SNS TOPIC FOR ALERTS
+  # ============================================================================
+  
+  SNSTopicArn:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-alerts'
+      DisplayName: !Sub 'Lyo ${Environment} Alerts'
+      
+  # ============================================================================
+  # CLOUDWATCH DASHBOARD
+  # ============================================================================
+  
+  CloudWatchDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-${Environment}-dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ECS", "CPUUtilization", "ServiceName", "${ProjectName}-${Environment}", "ClusterName", "${InfrastructureStackName}-ECS-Cluster"],
+                  [".", "MemoryUtilization", ".", ".", ".", "."]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "ECS Service - CPU & Memory"
+              }
+            },
+            {
+              "type": "metric", 
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${InfrastructureStackName}-ALB-ARN"],
+                  [".", "TargetResponseTime", ".", "."],
+                  [".", "HTTPCode_Target_2XX_Count", ".", "."],
+                  [".", "HTTPCode_Target_4XX_Count", ".", "."],
+                  [".", "HTTPCode_Target_5XX_Count", ".", "."]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "ALB - Requests & Response Times"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6, 
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${ProjectName}-${Environment}-postgres"],
+                  [".", "DatabaseConnections", ".", "."],
+                  [".", "ReadLatency", ".", "."],
+                  [".", "WriteLatency", ".", "."]
+                ],
+                "period": 300,
+                "stat": "Average", 
+                "region": "${AWS::Region}",
+                "title": "RDS PostgreSQL - Performance"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ElastiCache", "CPUUtilization", "CacheClusterId", "${ProjectName}-${Environment}-redis"],
+                  [".", "NetworkBytesIn", ".", "."],
+                  [".", "NetworkBytesOut", ".", "."],
+                  [".", "CurrConnections", ".", "."]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "ElastiCache Redis - Performance"
+              }
+            }
+          ]
+        }
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+
+Outputs:
+  ServiceName:
+    Description: ECS Service Name
+    Value: !Ref ECSService
+    Export:
+      Name: !Sub '${AWS::StackName}-ECS-Service'
+
+  TaskDefinitionArn:
+    Description: ECS Task Definition ARN
+    Value: !Ref ECSTaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskDefinition-ARN'
+
+  ServiceURL:
+    Description: Application URL
+    Value: !Sub
+      - 'https://${ALBDomain}'
+      - ALBDomain:
+          Fn::ImportValue: !Sub '${InfrastructureStackName}-ALB-DNS'
+    Export:
+      Name: !Sub '${AWS::StackName}-Service-URL'
+
+  SNSTopicArn:
+    Description: SNS Topic for alerts
+    Value: !Ref SNSTopicArn
+    Export:
+      Name: !Sub '${AWS::StackName}-SNS-Topic'
+
+  DashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-${Environment}-dashboard'
+    Export:
+      Name: !Sub '${AWS::StackName}-Dashboard-URL'

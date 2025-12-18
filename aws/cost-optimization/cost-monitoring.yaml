@@ -1,0 +1,644 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lyo SaaS Cost Optimization and Monitoring - Budget controls and cost-effective scaling'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [staging, production]
+  
+  ProjectName:
+    Type: String
+    Default: lyo-saas
+    
+  MonthlyBudgetLimit:
+    Type: Number
+    Default: 200
+    Description: Monthly budget limit in USD
+    
+  CostAlertEmail:
+    Type: String
+    Description: Email address for cost alerts
+    Default: finance@lyo-booking.com
+
+Resources:
+  # ============================================================================
+  # COST BUDGETS AND ALERTS
+  # ============================================================================
+  
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub '${ProjectName}-${Environment}-monthly-budget'
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetLimit
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+        CostFilters:
+          TagKey:
+            - Environment
+            - Project
+          TagValue:
+            - !Ref Environment
+            - !Ref ProjectName
+      NotificationsWithSubscribers:
+        # 50% threshold warning
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+            NotificationState: ALARM
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref CostAlertEmail
+        
+        # 75% threshold alert
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 75
+            ThresholdType: PERCENTAGE
+            NotificationState: ALARM
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref CostAlertEmail
+        
+        # 90% threshold critical
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 90
+            ThresholdType: PERCENTAGE
+            NotificationState: ALARM
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref CostAlertEmail
+        
+        # Forecasted 100% alert
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+            NotificationState: ALARM
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref CostAlertEmail
+
+  # Service-specific budgets
+  ECSBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub '${ProjectName}-${Environment}-ecs-budget'
+        BudgetLimit:
+          Amount: !If [IsProduction, 80, 20]  # 80% of budget for ECS in prod
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+        CostFilters:
+          Service:
+            - Amazon Elastic Container Service
+          TagKey:
+            - Environment
+          TagValue:
+            - !Ref Environment
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref CostAlertEmail
+
+  RDSBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub '${ProjectName}-${Environment}-rds-budget'
+        BudgetLimit:
+          Amount: !If [IsProduction, 60, 15]  # Database costs
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+        CostFilters:
+          Service:
+            - Amazon Relational Database Service
+          TagKey:
+            - Environment
+          TagValue:
+            - !Ref Environment
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 75
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref CostAlertEmail
+
+  # ============================================================================
+  # COST ANOMALY DETECTION
+  # ============================================================================
+  
+  CostAnomalyDetector:
+    Type: AWS::CE::AnomalyDetector
+    Properties:
+      AnomalyDetectorName: !Sub '${ProjectName}-${Environment}-cost-anomaly'
+      MonitorType: DIMENSIONAL
+      MonitorSpecification:
+        DimensionKey: SERVICE
+        MatchOptions:
+          - EQUALS
+        Values:
+          - EC2-Instance
+          - Amazon Relational Database Service
+          - Amazon ElastiCache
+          - Amazon Elastic Container Service
+
+  CostAnomalySubscription:
+    Type: AWS::CE::AnomalySubscription
+    Properties:
+      SubscriptionName: !Sub '${ProjectName}-${Environment}-anomaly-alerts'
+      MonitorArnList:
+        - !GetAtt CostAnomalyDetector.AnomalyDetectorArn
+      Subscribers:
+        - Type: EMAIL
+          Address: !Ref CostAlertEmail
+      Frequency: IMMEDIATE
+      Threshold: 50  # Alert on anomalies over $50
+
+  # ============================================================================
+  # LAMBDA FUNCTIONS FOR COST OPTIMIZATION
+  # ============================================================================
+  
+  CostOptimizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-cost-optimizer'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt CostOptimizerRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          PROJECT_NAME: !Ref ProjectName
+          CLUSTER_NAME: !Sub '${ProjectName}-${Environment}'
+          SERVICE_NAME: !Sub '${ProjectName}-${Environment}'
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          from datetime import datetime, timedelta
+
+          def lambda_handler(event, context):
+              """
+              Automated cost optimization function
+              - Scale down non-production environments during off-hours
+              - Right-size instances based on usage
+              - Clean up unused resources
+              """
+              environment = os.environ['ENVIRONMENT']
+              project_name = os.environ['PROJECT_NAME']
+              
+              ecs = boto3.client('ecs')
+              cloudwatch = boto3.client('cloudwatch')
+              rds = boto3.client('rds')
+              
+              results = []
+              
+              try:
+                  # Check current time (UTC)
+                  current_hour = datetime.utcnow().hour
+                  current_day = datetime.utcnow().weekday()  # 0=Monday, 6=Sunday
+                  
+                  # Off-hours optimization (only for staging)
+                  if environment == 'staging':
+                      is_off_hours = (
+                          current_hour < 8 or current_hour > 20 or  # Before 8 AM or after 8 PM
+                          current_day >= 5  # Weekend (Saturday, Sunday)
+                      )
+                      
+                      if is_off_hours:
+                          # Scale down staging ECS service
+                          cluster_name = os.environ['CLUSTER_NAME']
+                          service_name = os.environ['SERVICE_NAME']
+                          
+                          ecs_response = ecs.describe_services(
+                              cluster=cluster_name,
+                              services=[service_name]
+                          )
+                          
+                          if ecs_response['services']:
+                              current_desired = ecs_response['services'][0]['desiredCount']
+                              
+                              if current_desired > 0:
+                                  # Scale down to 0 during off-hours
+                                  ecs.update_service(
+                                      cluster=cluster_name,
+                                      service=service_name,
+                                      desiredCount=0
+                                  )
+                                  results.append({
+                                      'action': 'scale_down_ecs',
+                                      'service': service_name,
+                                      'from': current_desired,
+                                      'to': 0,
+                                      'reason': 'off_hours'
+                                  })
+                      
+                      else:
+                          # Scale back up during business hours
+                          cluster_name = os.environ['CLUSTER_NAME']
+                          service_name = os.environ['SERVICE_NAME']
+                          
+                          ecs_response = ecs.describe_services(
+                              cluster=cluster_name,
+                              services=[service_name]
+                          )
+                          
+                          if ecs_response['services']:
+                              current_desired = ecs_response['services'][0]['desiredCount']
+                              
+                              if current_desired == 0:
+                                  # Scale up to 1 during business hours
+                                  ecs.update_service(
+                                      cluster=cluster_name,
+                                      service=service_name,
+                                      desiredCount=1
+                                  )
+                                  results.append({
+                                      'action': 'scale_up_ecs',
+                                      'service': service_name,
+                                      'from': 0,
+                                      'to': 1,
+                                      'reason': 'business_hours'
+                                  })
+                  
+                  # Right-sizing recommendations based on CloudWatch metrics
+                  end_time = datetime.utcnow()
+                  start_time = end_time - timedelta(days=7)  # Last 7 days
+                  
+                  # Get ECS service metrics
+                  cpu_metrics = cloudwatch.get_metric_statistics(
+                      Namespace='AWS/ECS',
+                      MetricName='CPUUtilization',
+                      Dimensions=[
+                          {'Name': 'ServiceName', 'Value': os.environ['SERVICE_NAME']},
+                          {'Name': 'ClusterName', 'Value': os.environ['CLUSTER_NAME']}
+                      ],
+                      StartTime=start_time,
+                      EndTime=end_time,
+                      Period=3600,  # 1 hour
+                      Statistics=['Average']
+                  )
+                  
+                  if cpu_metrics['Datapoints']:
+                      avg_cpu = sum(dp['Average'] for dp in cpu_metrics['Datapoints']) / len(cpu_metrics['Datapoints'])
+                      
+                      # Right-sizing recommendations
+                      if avg_cpu < 20 and environment == 'production':
+                          results.append({
+                              'action': 'recommendation',
+                              'type': 'downsize_ecs_tasks',
+                              'current_cpu_avg': avg_cpu,
+                              'reason': 'low_cpu_utilization',
+                              'suggestion': 'Consider reducing task CPU allocation or task count'
+                          })
+                      elif avg_cpu > 70:
+                          results.append({
+                              'action': 'recommendation',
+                              'type': 'upsize_ecs_tasks',
+                              'current_cpu_avg': avg_cpu,
+                              'reason': 'high_cpu_utilization',
+                              'suggestion': 'Consider increasing task CPU allocation or task count'
+                          })
+                  
+                  # Check for unused load balancers
+                  elb = boto3.client('elbv2')
+                  load_balancers = elb.describe_load_balancers()
+                  
+                  for lb in load_balancers['LoadBalancers']:
+                      target_groups = elb.describe_target_groups(LoadBalancerArn=lb['LoadBalancerArn'])
+                      
+                      total_targets = 0
+                      for tg in target_groups['TargetGroups']:
+                          targets = elb.describe_target_health(TargetGroupArn=tg['TargetGroupArn'])
+                          total_targets += len(targets['TargetHealthDescriptions'])
+                      
+                      if total_targets == 0:
+                          results.append({
+                              'action': 'recommendation',
+                              'type': 'unused_load_balancer',
+                              'resource': lb['LoadBalancerName'],
+                              'arn': lb['LoadBalancerArn'],
+                              'suggestion': 'Load balancer has no healthy targets - consider removing'
+                          })
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'status': 'success',
+                          'actions_taken': len([r for r in results if r['action'] != 'recommendation']),
+                          'recommendations': len([r for r in results if r['action'] == 'recommendation']),
+                          'details': results
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'status': 'error',
+                          'error': str(e)
+                      })
+                  }
+
+  CostOptimizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CostOptimizerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - ecs:DescribeClusters
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref CostOptimizationTopic
+
+  # Schedule cost optimization function
+  CostOptimizerSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Run cost optimization checks
+      ScheduleExpression: 'cron(0 */6 * * ? *)'  # Every 6 hours
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CostOptimizerFunction.Arn
+          Id: CostOptimizerTarget
+
+  CostOptimizerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CostOptimizerFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CostOptimizerSchedule.Arn
+
+  # ============================================================================
+  # RESERVED INSTANCE RECOMMENDATIONS
+  # ============================================================================
+  
+  ReservedInstanceAnalyzerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-ri-analyzer'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt RIAnalyzerRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          from datetime import datetime, timedelta
+
+          def lambda_handler(event, context):
+              """
+              Analyze usage patterns and recommend Reserved Instances
+              """
+              ce = boto3.client('ce')
+              
+              # Get usage data for last 30 days
+              end_date = datetime.utcnow().date()
+              start_date = end_date - timedelta(days=30)
+              
+              try:
+                  # Get RDS usage
+                  rds_usage = ce.get_usage_and_costs(
+                      TimePeriod={
+                          'Start': start_date.strftime('%Y-%m-%d'),
+                          'End': end_date.strftime('%Y-%m-%d')
+                      },
+                      Granularity='DAILY',
+                      Metrics=['BlendedCost', 'UsageQuantity'],
+                      GroupBy=[
+                          {
+                              'Type': 'DIMENSION',
+                              'Key': 'SERVICE'
+                          }
+                      ],
+                      Filter={
+                          'Dimensions': {
+                              'Key': 'SERVICE',
+                              'Values': ['Amazon Relational Database Service']
+                          }
+                      }
+                  )
+                  
+                  # Get RI recommendations
+                  ri_recommendations = ce.get_reservation_purchase_recommendation(
+                      Service='Amazon RDS',
+                      AccountScope='PAYER',
+                      LookbackPeriodInDays='THIRTY_DAYS',
+                      TermInYears='ONE_YEAR',
+                      PaymentOption='NO_UPFRONT'
+                  )
+                  
+                  recommendations = []
+                  
+                  for rec in ri_recommendations.get('Recommendations', []):
+                      recommendations.append({
+                          'service': 'RDS',
+                          'instance_type': rec['RecommendationDetails']['InstanceDetails']['RDSInstanceDetails']['InstanceType'],
+                          'estimated_monthly_savings': rec['RecommendationDetails']['EstimatedMonthlySavingsAmount'],
+                          'estimated_break_even': rec['RecommendationDetails']['EstimatedBreakEvenInMonths'],
+                          'upfront_cost': rec['RecommendationDetails']['UpfrontCost']
+                      })
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'status': 'success',
+                          'recommendations': recommendations,
+                          'analysis_period': f"{start_date} to {end_date}"
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'status': 'error',
+                          'error': str(e)
+                      })
+                  }
+
+  RIAnalyzerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CostExplorerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ce:GetUsageAndCosts
+                  - ce:GetReservationPurchaseRecommendation
+                  - ce:GetReservationUtilization
+                  - ce:GetReservationCoverage
+                Resource: '*'
+
+  # ============================================================================
+  # SNS TOPIC FOR COST NOTIFICATIONS
+  # ============================================================================
+  
+  CostOptimizationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-cost-optimization'
+      DisplayName: !Sub 'Lyo ${Environment} Cost Optimization Alerts'
+
+  CostOptimizationEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref CostOptimizationTopic
+      Protocol: email
+      Endpoint: !Ref CostAlertEmail
+
+  # ============================================================================
+  # CLOUDWATCH DASHBOARD FOR COST MONITORING
+  # ============================================================================
+  
+  CostDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-${Environment}-cost-dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/Billing", "EstimatedCharges", "Currency", "USD", { "label": "Total Estimated Charges" }]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "us-east-1",
+                "title": "AWS Estimated Charges (USD)",
+                "period": 86400,
+                "stat": "Maximum"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ECS", "CPUUtilization", "ServiceName", "${ProjectName}-${Environment}", "ClusterName", "${ProjectName}-${Environment}"],
+                  [".", "MemoryUtilization", ".", ".", ".", "."]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "ECS Resource Utilization (%)",
+                "period": 3600,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 24, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${ProjectName}-${Environment}-alb", { "label": "Total Requests" }],
+                  [".", "ActiveConnectionCount", ".", ".", { "label": "Active Connections" }]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Application Load - Cost Impact Metrics",
+                "period": 3600,
+                "stat": "Sum"
+              }
+            }
+          ]
+        }
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+  IsStaging: !Equals [!Ref Environment, 'staging']
+
+Outputs:
+  MonthlyBudgetId:
+    Description: Monthly Budget ID
+    Value: !Ref MonthlyBudget
+    Export:
+      Name: !Sub '${AWS::StackName}-Monthly-Budget'
+
+  CostAnomalyDetectorArn:
+    Description: Cost Anomaly Detector ARN
+    Value: !GetAtt CostAnomalyDetector.AnomalyDetectorArn
+    Export:
+      Name: !Sub '${AWS::StackName}-Cost-Anomaly-Detector'
+
+  CostOptimizerFunctionArn:
+    Description: Cost Optimizer Lambda Function ARN
+    Value: !GetAtt CostOptimizerFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-Cost-Optimizer-Function'
+
+  CostOptimizationTopicArn:
+    Description: Cost Optimization SNS Topic ARN
+    Value: !Ref CostOptimizationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-Cost-Optimization-Topic'
+
+  CostDashboardURL:
+    Description: Cost Monitoring Dashboard URL
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-${Environment}-cost-dashboard'
+    Export:
+      Name: !Sub '${AWS::StackName}-Cost-Dashboard-URL'

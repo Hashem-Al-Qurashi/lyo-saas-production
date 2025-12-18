@@ -1,0 +1,465 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lyo SaaS Backup and Disaster Recovery Strategy'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [staging, production]
+  
+  ProjectName:
+    Type: String
+    Default: lyo-saas
+    
+  InfrastructureStackName:
+    Type: String
+    Description: Name of the infrastructure CloudFormation stack
+    Default: lyo-infrastructure
+
+Resources:
+  # ============================================================================
+  # AWS BACKUP VAULT AND POLICIES
+  # ============================================================================
+  
+  BackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: !Sub '${ProjectName}-${Environment}-backup-vault'
+      EncryptionKeyArn: !Ref BackupKMSKey
+      AccessPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyDeleteBackup
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - backup:DeleteBackupVault
+              - backup:DeleteBackupPlan
+              - backup:DeleteRecoveryPoint
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                'aws:userid': !Sub '${AWS::AccountId}:root'
+
+  # KMS Key for backup encryption
+  BackupKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'KMS key for ${ProjectName} ${Environment} backups'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow AWS Backup
+            Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:CreateGrant
+            Resource: '*'
+
+  BackupKMSAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-${Environment}-backup'
+      TargetKeyId: !Ref BackupKMSKey
+
+  # ============================================================================
+  # BACKUP PLANS
+  # ============================================================================
+  
+  # Production backup plan - comprehensive
+  ProductionBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Condition: IsProduction
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub '${ProjectName}-production-backup-plan'
+        BackupPlanRule:
+          # Daily backups
+          - RuleName: DailyBackups
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: 'cron(0 2 * * ? *)'  # 2 AM daily
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 120
+            Lifecycle:
+              DeleteAfterDays: 30
+              MoveToColdStorageAfterDays: 7
+            RecoveryPointTags:
+              BackupType: Daily
+              Environment: !Ref Environment
+            CopyActions:
+              # Cross-region backup for disaster recovery
+              - DestinationBackupVaultArn: !Sub 'arn:aws:backup:us-west-2:${AWS::AccountId}:backup-vault:${ProjectName}-production-backup-vault-dr'
+                Lifecycle:
+                  DeleteAfterDays: 90
+                  MoveToColdStorageAfterDays: 30
+          
+          # Weekly backups (longer retention)
+          - RuleName: WeeklyBackups
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: 'cron(0 3 ? * SUN *)'  # 3 AM every Sunday
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 180
+            Lifecycle:
+              DeleteAfterDays: 90
+              MoveToColdStorageAfterDays: 14
+            RecoveryPointTags:
+              BackupType: Weekly
+              Environment: !Ref Environment
+          
+          # Monthly backups (archival)
+          - RuleName: MonthlyBackups
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: 'cron(0 4 1 * ? *)'  # 4 AM first day of month
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 240
+            Lifecycle:
+              DeleteAfterDays: 2555  # 7 years for compliance
+              MoveToColdStorageAfterDays: 30
+            RecoveryPointTags:
+              BackupType: Monthly
+              Environment: !Ref Environment
+
+  # Staging backup plan - basic
+  StagingBackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Condition: IsStaging
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub '${ProjectName}-staging-backup-plan'
+        BackupPlanRule:
+          # Daily backups only for staging
+          - RuleName: DailyBackups
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: 'cron(0 2 * * ? *)'
+            StartWindowMinutes: 60
+            CompletionWindowMinutes: 120
+            Lifecycle:
+              DeleteAfterDays: 7
+            RecoveryPointTags:
+              BackupType: Daily
+              Environment: !Ref Environment
+
+  # ============================================================================
+  # BACKUP SELECTION (Resources to backup)
+  # ============================================================================
+  
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+
+  DatabaseBackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !If [IsProduction, !Ref ProductionBackupPlan, !Ref StagingBackupPlan]
+      BackupSelection:
+        SelectionName: !Sub '${ProjectName}-${Environment}-database-backup'
+        IamRoleArn: !GetAtt BackupRole.Arn
+        Resources:
+          - !Sub 
+            - 'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${DatabaseId}'
+            - DatabaseId: !Sub '${ProjectName}-${Environment}-postgres'
+        Conditions:
+          StringEquals:
+            'aws:ResourceTag/Environment': !Ref Environment
+            'aws:ResourceTag/BackupEnabled': 'true'
+
+  # ============================================================================
+  # POINT-IN-TIME RECOVERY FOR RDS
+  # ============================================================================
+  
+  # Note: RDS Point-in-Time Recovery is enabled in the main infrastructure template
+  # This section configures monitoring and automated response
+
+  BackupFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-backup-failure'
+      AlarmDescription: Alert when backup jobs fail
+      MetricName: NumberOfBackupJobsFailed
+      Namespace: AWS/Backup
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # ============================================================================
+  # DISASTER RECOVERY AUTOMATION
+  # ============================================================================
+  
+  # Lambda function for automated DR testing
+  DRTestingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-dr-testing'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt DRTestingRole.Arn
+      Timeout: 900
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          PROJECT_NAME: !Ref ProjectName
+          BACKUP_VAULT: !Ref BackupVault
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          from datetime import datetime, timedelta
+
+          def lambda_handler(event, context):
+              """
+              Automated DR testing function
+              Tests backup restoration process monthly
+              """
+              backup = boto3.client('backup')
+              rds = boto3.client('rds')
+              sns = boto3.client('sns')
+              
+              project_name = os.environ['PROJECT_NAME']
+              environment = os.environ['ENVIRONMENT']
+              
+              try:
+                  # Get latest backup
+                  response = backup.list_recovery_points_by_backup_vault(
+                      BackupVaultName=os.environ['BACKUP_VAULT'],
+                      ByResourceType='RDS'
+                  )
+                  
+                  if not response['RecoveryPoints']:
+                      raise Exception("No RDS backups found")
+                  
+                  latest_backup = sorted(
+                      response['RecoveryPoints'], 
+                      key=lambda x: x['CreationDate'], 
+                      reverse=True
+                  )[0]
+                  
+                  # Test restore to a test instance
+                  test_instance_id = f"{project_name}-{environment}-dr-test"
+                  
+                  # Start restore job
+                  restore_response = backup.start_restore_job(
+                      RecoveryPointArn=latest_backup['RecoveryPointArn'],
+                      Metadata={
+                          'DBInstanceIdentifier': test_instance_id,
+                          'DBInstanceClass': 'db.t3.micro',
+                          'VpcSecurityGroupIds': 'sg-12345',  # Replace with actual
+                          'DBSubnetGroupName': 'lyo-db-subnet-group'
+                      },
+                      IamRoleArn=context.invoked_function_arn.replace(':function:', ':role/').replace(f'-dr-testing', '-backup-role'),
+                      ResourceType='RDS'
+                  )
+                  
+                  # Log results
+                  result = {
+                      'status': 'success',
+                      'restore_job_id': restore_response['RestoreJobId'],
+                      'backup_date': latest_backup['CreationDate'].isoformat(),
+                      'test_instance': test_instance_id
+                  }
+                  
+                  print(json.dumps(result))
+                  return result
+                  
+              except Exception as e:
+                  error_result = {
+                      'status': 'error',
+                      'error': str(e),
+                      'timestamp': datetime.utcnow().isoformat()
+                  }
+                  print(json.dumps(error_result))
+                  raise
+
+  DRTestingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DRTestingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - backup:ListRecoveryPointsByBackupVault
+                  - backup:StartRestoreJob
+                  - backup:DescribeRestoreJob
+                  - rds:CreateDBInstance
+                  - rds:DeleteDBInstance
+                  - rds:DescribeDBInstances
+                Resource: '*'
+
+  # Schedule monthly DR testing
+  DRTestingSchedule:
+    Type: AWS::Events::Rule
+    Condition: IsProduction
+    Properties:
+      Description: Monthly disaster recovery testing
+      ScheduleExpression: 'cron(0 6 1 * ? *)'  # First day of month at 6 AM
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DRTestingFunction.Arn
+          Id: DRTestingTarget
+
+  DRTestingLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsProduction
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DRTestingFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DRTestingSchedule.Arn
+
+  # ============================================================================
+  # CROSS-REGION BACKUP VAULT FOR DR
+  # ============================================================================
+  
+  # Note: This would need to be deployed in the DR region (us-west-2)
+  # Included here for completeness but should be deployed separately
+
+  # ============================================================================
+  # BACKUP MONITORING AND ALERTING
+  # ============================================================================
+  
+  BackupJobCompleteRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Monitor backup job completion
+      EventPattern:
+        source:
+          - aws.backup
+        detail-type:
+          - Backup Job State Change
+        detail:
+          state:
+            - COMPLETED
+            - FAILED
+            - ABORTED
+      State: ENABLED
+      Targets:
+        - Arn: !Ref BackupNotificationTopic
+          Id: BackupNotificationTarget
+
+  BackupNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-backup-notifications'
+      DisplayName: !Sub 'Lyo ${Environment} Backup Notifications'
+
+  # ============================================================================
+  # BACKUP RECOVERY PROCEDURES
+  # ============================================================================
+  
+  RecoveryRunbook:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      Name: !Sub '${ProjectName}-${Environment}-recovery-runbook'
+      Content:
+        schemaVersion: '0.3'
+        description: Emergency recovery procedures for Lyo SaaS
+        parameters:
+          RecoveryPointArn:
+            type: String
+            description: ARN of the backup recovery point to restore
+          TargetEnvironment:
+            type: String
+            description: Target environment for recovery
+            allowedValues:
+              - staging
+              - production-dr
+        mainSteps:
+          - name: ValidateBackup
+            action: aws:executeAwsApi
+            inputs:
+              Service: backup
+              Api: DescribeRecoveryPoint
+              RecoveryPointArn: '{{ RecoveryPointArn }}'
+          
+          - name: StartRestoreJob
+            action: aws:executeAwsApi
+            inputs:
+              Service: backup
+              Api: StartRestoreJob
+              RecoveryPointArn: '{{ RecoveryPointArn }}'
+              Metadata:
+                DBInstanceIdentifier: !Sub '${ProjectName}-{{ TargetEnvironment }}-postgres-restored'
+              IamRoleArn: !GetAtt BackupRole.Arn
+              ResourceType: RDS
+          
+          - name: WaitForRestore
+            action: aws:sleep
+            inputs:
+              Duration: PT10M
+          
+          - name: ValidateRestore
+            action: aws:executeAwsApi
+            inputs:
+              Service: rds
+              Api: DescribeDBInstances
+              DBInstanceIdentifier: !Sub '${ProjectName}-{{ TargetEnvironment }}-postgres-restored'
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+  IsStaging: !Equals [!Ref Environment, 'staging']
+
+Outputs:
+  BackupVaultArn:
+    Description: Backup Vault ARN
+    Value: !GetAtt BackupVault.BackupVaultArn
+    Export:
+      Name: !Sub '${AWS::StackName}-BackupVault-ARN'
+
+  BackupPlanId:
+    Description: Backup Plan ID
+    Value: !If [IsProduction, !Ref ProductionBackupPlan, !Ref StagingBackupPlan]
+    Export:
+      Name: !Sub '${AWS::StackName}-BackupPlan-ID'
+
+  DRTestingFunctionArn:
+    Description: DR Testing Lambda Function ARN
+    Value: !GetAtt DRTestingFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DRTesting-Function-ARN'
+
+  RecoveryRunbookName:
+    Description: Recovery Runbook Document Name
+    Value: !Ref RecoveryRunbook
+    Export:
+      Name: !Sub '${AWS::StackName}-Recovery-Runbook'
+
+  BackupNotificationTopicArn:
+    Description: Backup Notification SNS Topic ARN
+    Value: !Ref BackupNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-Backup-Notifications-Topic'

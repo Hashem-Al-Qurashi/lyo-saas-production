@@ -1,0 +1,30 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "ProjectName", 
+    "ParameterValue": "lyo-saas"
+  },
+  {
+    "ParameterKey": "DatabaseMasterUsername",
+    "ParameterValue": "lyoadmin"
+  },
+  {
+    "ParameterKey": "DatabaseMasterPassword",
+    "ParameterValue": "LyoSaaS2024Production!"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "api.lyo-booking.com"
+  },
+  {
+    "ParameterKey": "OpenAIApiKey",
+    "ParameterValue": "REPLACE_WITH_OPENAI_API_KEY"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": "arn:aws:acm:us-east-1:440671981955:certificate/placeholder"
+  }
+]

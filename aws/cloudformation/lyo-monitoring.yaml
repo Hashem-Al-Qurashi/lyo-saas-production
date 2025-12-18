@@ -1,0 +1,594 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lyo SaaS Monitoring & Observability Stack - CloudWatch, X-Ray, and alerting'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [staging, production]
+  
+  ProjectName:
+    Type: String
+    Default: lyo-saas
+  
+  InfrastructureStackName:
+    Type: String
+    Description: Name of the infrastructure CloudFormation stack
+    Default: lyo-infrastructure
+    
+  AlertEmail:
+    Type: String
+    Description: Email address for critical alerts
+    Default: alerts@lyo-booking.com
+    
+  SlackWebhookUrl:
+    Type: String
+    Description: Slack webhook URL for alerts (optional)
+    Default: ""
+    NoEcho: true
+
+Resources:
+  # ============================================================================
+  # SNS TOPICS FOR ALERTS
+  # ============================================================================
+  
+  CriticalAlertsTopicSNS:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-critical-alerts'
+      DisplayName: !Sub 'Lyo ${Environment} Critical Alerts'
+      DeliveryPolicy:
+        healthyRetryPolicy:
+          minDelayTarget: 20
+          maxDelayTarget: 20
+          numRetries: 3
+          numMaxDelayRetries: 0
+          numMinDelayRetries: 0
+          numNoDelayRetries: 0
+          backoffFunction: linear
+
+  WarningAlertsTopicSNS:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-warning-alerts'
+      DisplayName: !Sub 'Lyo ${Environment} Warning Alerts'
+
+  # Email subscriptions
+  CriticalEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref CriticalAlertsTopicSNS
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  WarningEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref WarningAlertsTopicSNS
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ============================================================================
+  # CLOUDWATCH DASHBOARDS
+  # ============================================================================
+  
+  ApplicationDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-${Environment}-application'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ECS", "CPUUtilization", "ServiceName", "${ProjectName}-${Environment}", "ClusterName", "${ProjectName}-${Environment}"],
+                  [".", "MemoryUtilization", ".", ".", ".", "."]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "ECS Service - CPU & Memory",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${InfrastructureStackName}-ALB"],
+                  [".", "TargetResponseTime", ".", "."],
+                  [".", "HTTPCode_Target_2XX_Count", ".", "."],
+                  [".", "HTTPCode_Target_4XX_Count", ".", "."],
+                  [".", "HTTPCode_Target_5XX_Count", ".", "."]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Load Balancer - Requests & Responses",
+                "period": 300,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 8, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${ProjectName}-${Environment}-postgres"],
+                  [".", "DatabaseConnections", ".", "."],
+                  [".", "ReadLatency", ".", "."],
+                  [".", "WriteLatency", ".", "."]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "RDS PostgreSQL - Performance",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 6, "width": 8, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ElastiCache", "CPUUtilization", "CacheClusterId", "${ProjectName}-${Environment}-redis-001"],
+                  [".", "NetworkBytesIn", ".", "."],
+                  [".", "NetworkBytesOut", ".", "."],
+                  [".", "CurrConnections", ".", "."]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "ElastiCache Redis - Performance",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 6, "width": 8, "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/ECS", "RunningTaskCount", "ServiceName", "${ProjectName}-${Environment}", "ClusterName", "${ProjectName}-${Environment}"],
+                  [".", "DesiredCount", ".", ".", ".", "."],
+                  [".", "PendingTaskCount", ".", ".", ".", "."]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "ECS Service - Task Counts",
+                "period": 300,
+                "stat": "Average"
+              }
+            }
+          ]
+        }
+
+  # ============================================================================
+  # CLOUDWATCH ALARMS - APPLICATION HEALTH
+  # ============================================================================
+
+  # ECS Service High CPU
+  ECSHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-ECS-HighCPU'
+      AlarmDescription: ECS service CPU utilization is high
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !Sub '${ProjectName}-${Environment}'
+        - Name: ClusterName
+          Value: !Sub '${ProjectName}-${Environment}'
+      AlarmActions:
+        - !Ref WarningAlertsTopicSNS
+      OKActions:
+        - !Ref WarningAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # ECS Service High Memory
+  ECSHighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-ECS-HighMemory'
+      AlarmDescription: ECS service memory utilization is high
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !Sub '${ProjectName}-${Environment}'
+        - Name: ClusterName
+          Value: !Sub '${ProjectName}-${Environment}'
+      AlarmActions:
+        - !Ref CriticalAlertsTopicSNS
+      OKActions:
+        - !Ref CriticalAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # ECS Service Task Count (too few running)
+  ECSLowTaskCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-ECS-LowTaskCount'
+      AlarmDescription: ECS service has too few running tasks
+      MetricName: RunningTaskCount
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: ServiceName
+          Value: !Sub '${ProjectName}-${Environment}'
+        - Name: ClusterName
+          Value: !Sub '${ProjectName}-${Environment}'
+      AlarmActions:
+        - !Ref CriticalAlertsTopicSNS
+      OKActions:
+        - !Ref CriticalAlertsTopicSNS
+      TreatMissingData: breaching
+
+  # ============================================================================
+  # CLOUDWATCH ALARMS - LOAD BALANCER
+  # ============================================================================
+
+  # ALB High 5XX Errors
+  ALBHigh5XXAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-ALB-High5XX'
+      AlarmDescription: High rate of 5XX errors from load balancer
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: 
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-ALB-ARN'
+      AlarmActions:
+        - !Ref CriticalAlertsTopicSNS
+      OKActions:
+        - !Ref CriticalAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # ALB High Response Time
+  ALBHighResponseTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-ALB-HighResponseTime'
+      AlarmDescription: Load balancer response time is high
+      MetricName: TargetResponseTime
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-ALB-ARN'
+      AlarmActions:
+        - !Ref WarningAlertsTopicSNS
+      OKActions:
+        - !Ref WarningAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # ALB Unhealthy Targets
+  ALBUnhealthyTargetsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-ALB-UnhealthyTargets'
+      AlarmDescription: Load balancer has unhealthy targets
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-TargetGroup-ARN'
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue: !Sub '${InfrastructureStackName}-ALB-ARN'
+      AlarmActions:
+        - !Ref CriticalAlertsTopicSNS
+      OKActions:
+        - !Ref CriticalAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # ============================================================================
+  # CLOUDWATCH ALARMS - DATABASE
+  # ============================================================================
+
+  # RDS High CPU
+  RDSHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-RDS-HighCPU'
+      AlarmDescription: RDS database CPU utilization is high
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Sub '${ProjectName}-${Environment}-postgres'
+      AlarmActions:
+        - !Ref WarningAlertsTopicSNS
+      OKActions:
+        - !Ref WarningAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # RDS High Connections
+  RDSHighConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-RDS-HighConnections'
+      AlarmDescription: RDS database has too many connections
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Sub '${ProjectName}-${Environment}-postgres'
+      AlarmActions:
+        - !Ref WarningAlertsTopicSNS
+      OKActions:
+        - !Ref WarningAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # RDS Low Free Storage
+  RDSLowStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-RDS-LowStorage'
+      AlarmDescription: RDS database free storage is low
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2147483648  # 2GB in bytes
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Sub '${ProjectName}-${Environment}-postgres'
+      AlarmActions:
+        - !Ref CriticalAlertsTopicSNS
+      OKActions:
+        - !Ref CriticalAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # ============================================================================
+  # CLOUDWATCH ALARMS - REDIS
+  # ============================================================================
+
+  # Redis High CPU
+  RedisHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-Redis-HighCPU'
+      AlarmDescription: Redis CPU utilization is high
+      MetricName: CPUUtilization
+      Namespace: AWS/ElastiCache
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: CacheClusterId
+          Value: !Sub '${ProjectName}-${Environment}-redis-001'
+      AlarmActions:
+        - !Ref WarningAlertsTopicSNS
+      OKActions:
+        - !Ref WarningAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # Redis High Memory Usage
+  RedisHighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-Redis-HighMemory'
+      AlarmDescription: Redis memory utilization is high
+      MetricName: DatabaseMemoryUsagePercentage
+      Namespace: AWS/ElastiCache
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: CacheClusterId
+          Value: !Sub '${ProjectName}-${Environment}-redis-001'
+      AlarmActions:
+        - !Ref CriticalAlertsTopicSNS
+      OKActions:
+        - !Ref CriticalAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # ============================================================================
+  # CLOUDWATCH LOGS - AGGREGATION AND RETENTION
+  # ============================================================================
+
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/${ProjectName}-${Environment}'
+      RetentionInDays: !If [IsProduction, 14, 7]
+
+  ALBAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/elasticloadbalancing/${ProjectName}-${Environment}'
+      RetentionInDays: !If [IsProduction, 30, 7]
+
+  # ============================================================================
+  # LOG FILTERS FOR ERROR TRACKING
+  # ============================================================================
+
+  ErrorLogFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ApplicationLogGroup
+      FilterPattern: '[timestamp, request_id, level="ERROR", ...]'
+      MetricTransformations:
+        - MetricNamespace: !Sub 'Lyo/${Environment}'
+          MetricName: ErrorCount
+          MetricValue: '1'
+          DefaultValue: 0
+
+  # Custom metric alarm for application errors
+  ApplicationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-ApplicationErrors'
+      AlarmDescription: High rate of application errors
+      MetricName: ErrorCount
+      Namespace: !Sub 'Lyo/${Environment}'
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref CriticalAlertsTopicSNS
+      OKActions:
+        - !Ref CriticalAlertsTopicSNS
+      TreatMissingData: notBreaching
+
+  # ============================================================================
+  # X-RAY TRACING (for request tracing)
+  # ============================================================================
+
+  XRayServiceMap:
+    Type: AWS::ServiceCatalog::CloudFormationProduct
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-xray'
+      Description: X-Ray tracing for Lyo SaaS
+      Owner: Lyo Engineering
+      ProvisioningArtifactParameters:
+        - Name: !Sub 'v1.0-${Environment}'
+          Description: X-Ray tracing configuration
+          Info:
+            LoadTemplateFromURL: |
+              {
+                "AWSTemplateFormatVersion": "2010-09-09",
+                "Description": "X-Ray tracing configuration",
+                "Resources": {
+                  "XRayTracingConfig": {
+                    "Type": "AWS::XRay::SamplingRule",
+                    "Properties": {
+                      "SamplingRule": {
+                        "ruleName": "LyoSamplingRule",
+                        "priority": 9000,
+                        "fixedRate": 0.1,
+                        "reservoirSize": 1,
+                        "serviceName": "*",
+                        "serviceType": "*",
+                        "host": "*",
+                        "HTTPMethod": "*",
+                        "URLPath": "*",
+                        "version": 1
+                      }
+                    }
+                  }
+                }
+              }
+
+  # ============================================================================
+  # COST MONITORING
+  # ============================================================================
+
+  BudgetAlert:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub '${ProjectName}-${Environment}-monthly-budget'
+        BudgetLimit:
+          Amount: !If [IsProduction, 200, 50]  # $200 prod, $50 staging
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+        CostFilters:
+          TagKey:
+            - Environment
+          TagValue:
+            - !Ref Environment
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+  HasSlackWebhook: !Not [!Equals [!Ref SlackWebhookUrl, '']]
+
+Outputs:
+  CriticalAlertsTopicArn:
+    Description: SNS Topic ARN for critical alerts
+    Value: !Ref CriticalAlertsTopicSNS
+    Export:
+      Name: !Sub '${AWS::StackName}-Critical-Alerts-Topic'
+
+  WarningAlertsTopicArn:
+    Description: SNS Topic ARN for warning alerts
+    Value: !Ref WarningAlertsTopicSNS
+    Export:
+      Name: !Sub '${AWS::StackName}-Warning-Alerts-Topic'
+
+  ApplicationDashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-${Environment}-application'
+    Export:
+      Name: !Sub '${AWS::StackName}-Dashboard-URL'
+
+  LogGroupArn:
+    Description: Application log group ARN
+    Value: !GetAtt ApplicationLogGroup.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroup-ARN'

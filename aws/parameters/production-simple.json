@@ -1,0 +1,18 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "ProjectName", 
+    "ParameterValue": "lyo-saas"
+  },
+  {
+    "ParameterKey": "DatabaseMasterUsername",
+    "ParameterValue": "lyoadmin"
+  },
+  {
+    "ParameterKey": "DatabaseMasterPassword",
+    "ParameterValue": "LyoSaaS2024Production!"
+  }
+]
