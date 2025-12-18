@@ -1,0 +1,105 @@
+# ============================================================================
+# Docker ignore file for Lyo SaaS
+# Exclude unnecessary files from Docker build context
+# ============================================================================
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+*.md
+docs/
+
+# CI/CD files
+.github/
+.gitlab-ci.yml
+azure-pipelines.yml
+Jenkinsfile
+
+# Development files
+.env*
+.vscode/
+.idea/
+*.log
+*.pid
+
+# Test files
+tests/
+test_*.py
+*_test.py
+pytest.ini
+coverage.xml
+.coverage
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# Logs
+logs/
+*.log
+
+# Runtime files
+*.pid
+*.sock
+
+# Backup files
+*.bak
+*.backup
+
+# Platform specific deployment files
+Procfile
+railway.toml
+vercel.json
+vercel.production.json
+
+# AWS deployment files (these go in separate deployment repos)
+aws/
+terraform/
+cloudformation/
+
+# Scripts that aren't needed in container
+scripts/
+deploy.sh
+setup-ssl.sh
+backup.sh
+
+# Development nginx config
+nginx/
+
+# Local development files
+local/
+dev/
