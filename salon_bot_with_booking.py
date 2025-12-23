@@ -205,6 +205,11 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
         # Normalize phone
         normalized_phone = normalize_phone(customer_phone)
 
+        # Validate customer name
+        if not customer_name or not customer_name.strip():
+            return {"success": False, "error": "Nome cliente richiesto."}
+        customer_name = customer_name.strip()
+
         # Validate service
         service = SALON_SERVICES.get(service_type.lower())
         if not service:
@@ -212,60 +217,55 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                 "success": False,
                 "error": f"Servizio non riconosciuto: {service_type}. Servizi disponibili: taglio, piega, colore, colpi_sole, trattamento"
             }
-        
-        # Validate date
+
+        # Validate date and time together (check if in the past)
         try:
-            appointment_date = datetime.strptime(date, "%Y-%m-%d")
-            if appointment_date.date() < datetime.now().date():
-                return {"success": False, "error": "Non è possibile prenotare nel passato"}
+            appointment_datetime = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+            if appointment_datetime < datetime.now():
+                return {"success": False, "error": "Non è possibile prenotare nel passato."}
         except ValueError:
-            return {"success": False, "error": f"Formato data non valido: {date}. Usa YYYY-MM-DD"}
-        
-        # Validate time
-        try:
-            datetime.strptime(time, "%H:%M")
-        except ValueError:
-            return {"success": False, "error": f"Formato ora non valido: {time}. Usa HH:MM"}
+            return {"success": False, "error": f"Formato data/ora non valido: {date} {time}. Usa YYYY-MM-DD e HH:MM"}
         
         conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Check availability
-        cur.execute(
-            """SELECT COUNT(*) FROM salon_appointments 
-               WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-            (date, time)
-        )
-        count = cur.fetchone()[0]
-        
-        if count > 0:
-            conn.close()
+        try:
+            cur = conn.cursor()
+
+            # Check availability
+            cur.execute(
+                """SELECT COUNT(*) FROM salon_appointments
+                   WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                (date, time)
+            )
+            count = cur.fetchone()[0]
+
+            if count > 0:
+                return {
+                    "success": False,
+                    "error": f"Mi dispiace, il {date} alle {time} è già occupato. Prova un altro orario."
+                }
+
+            # Create appointment
+            cur.execute(
+                """INSERT INTO salon_appointments
+                   (customer_phone, customer_name, service_type, appointment_date, appointment_time, duration_minutes, price, status)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'confirmed')
+                   RETURNING id""",
+                (normalized_phone, customer_name, service_type, date, time, service["duration"], service["price"])
+            )
+
+            appointment_id = cur.fetchone()[0]
+            conn.commit()
+
+            logger.info(f"✅ Appointment created: #{appointment_id} for {customer_name}")
+
             return {
-                "success": False,
-                "error": f"Mi dispiace, il {date} alle {time} è già occupato. Prova un altro orario."
+                "success": True,
+                "appointment_id": appointment_id,
+                "message": f"Prenotazione confermata! Appuntamento #{appointment_id}: {customer_name}, {service['name_it']} il {date} alle {time}. Costo: €{service['price']}"
             }
-        
-        # Create appointment
-        cur.execute(
-            """INSERT INTO salon_appointments
-               (customer_phone, customer_name, service_type, appointment_date, appointment_time, duration_minutes, price, status)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, 'confirmed')
-               RETURNING id""",
-            (normalized_phone, customer_name, service_type, date, time, service["duration"], service["price"])
-        )
-        
-        appointment_id = cur.fetchone()[0]
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"✅ Appointment created: #{appointment_id} for {customer_name}")
-        
-        return {
-            "success": True,
-            "appointment_id": appointment_id,
-            "message": f"Prenotazione confermata! Appuntamento #{appointment_id}: {customer_name}, {service['name_it']} il {date} alle {time}. Costo: €{service['price']}"
-        }
-        
+        finally:
+            conn.close()
+
     except Exception as e:
         logger.error(f"❌ Create appointment error: {e}")
         return {"success": False, "error": f"Errore nella prenotazione: {str(e)}"}
@@ -274,25 +274,24 @@ def check_availability(date: str, time: str) -> Dict[str, Any]:
     """Check if a time slot is available"""
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
-        
-        cur.execute(
-            """SELECT COUNT(*) FROM salon_appointments 
-               WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-            (date, time)
-        )
-        
-        count = cur.fetchone()[0]
-        conn.close()
-        
-        available = count == 0
-        
-        return {
-            "success": True,
-            "available": available,
-            "message": f"{date} alle {time}: {'Disponibile ✅' if available else 'Già prenotato ❌'}"
-        }
-        
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT COUNT(*) FROM salon_appointments
+                   WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                (date, time)
+            )
+            count = cur.fetchone()[0]
+            available = count == 0
+
+            return {
+                "success": True,
+                "available": available,
+                "message": f"{date} alle {time}: {'Disponibile ✅' if available else 'Già prenotato ❌'}"
+            }
+        finally:
+            conn.close()
+
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -303,44 +302,44 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
         normalized_phone = normalize_phone(customer_phone)
 
         conn = get_db_connection()
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT id, customer_name, service_type, appointment_date, appointment_time, price, status
+                   FROM salon_appointments
+                   WHERE customer_phone = %s AND status = 'confirmed'
+                   ORDER BY appointment_date, appointment_time""",
+                (normalized_phone,)
+            )
 
-        cur.execute(
-            """SELECT id, customer_name, service_type, appointment_date, appointment_time, price, status
-               FROM salon_appointments
-               WHERE customer_phone = %s AND status = 'confirmed'
-               ORDER BY appointment_date, appointment_time""",
-            (normalized_phone,)
-        )
-        
-        appointments = []
-        for row in cur.fetchall():
-            service = SALON_SERVICES.get(row[2], {})
-            appointments.append({
-                "appointment_id": row[0],
-                "customer_name": row[1],
-                "service": service.get("name_it", row[2]),
-                "date": str(row[3]),
-                "time": str(row[4]),
-                "price": float(row[5]) if row[5] else 0,
-                "status": row[6]
-            })
-        
-        conn.close()
-        
-        if not appointments:
+            appointments = []
+            for row in cur.fetchall():
+                service = SALON_SERVICES.get(row[2], {})
+                appointments.append({
+                    "appointment_id": row[0],
+                    "customer_name": row[1],
+                    "service": service.get("name_it", row[2]),
+                    "date": str(row[3]),
+                    "time": str(row[4]),
+                    "price": float(row[5]) if row[5] else 0,
+                    "status": row[6]
+                })
+
+            if not appointments:
+                return {
+                    "success": True,
+                    "appointments": [],
+                    "message": "Non hai appuntamenti attivi."
+                }
+
             return {
                 "success": True,
-                "appointments": [],
-                "message": "Non hai appuntamenti attivi."
+                "appointments": appointments,
+                "message": f"Hai {len(appointments)} appuntamento/i attivo/i."
             }
-        
-        return {
-            "success": True,
-            "appointments": appointments,
-            "message": f"Hai {len(appointments)} appuntamento/i attivo/i."
-        }
-        
+        finally:
+            conn.close()
+
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -351,37 +350,38 @@ def cancel_appointment(customer_phone: str, appointment_id: int) -> Dict[str, An
         normalized_phone = normalize_phone(customer_phone)
 
         conn = get_db_connection()
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
 
-        # Verify appointment belongs to customer
-        cur.execute(
-            """SELECT id FROM salon_appointments
-               WHERE id = %s AND customer_phone = %s AND status = 'confirmed'""",
-            (appointment_id, normalized_phone)
-        )
-        
-        if not cur.fetchone():
-            conn.close()
+            # Verify appointment belongs to customer
+            cur.execute(
+                """SELECT id FROM salon_appointments
+                   WHERE id = %s AND customer_phone = %s AND status = 'confirmed'""",
+                (appointment_id, normalized_phone)
+            )
+
+            if not cur.fetchone():
+                return {
+                    "success": False,
+                    "error": f"Appuntamento #{appointment_id} non trovato o già cancellato."
+                }
+
+            # Cancel appointment
+            cur.execute(
+                "UPDATE salon_appointments SET status = 'cancelled' WHERE id = %s",
+                (appointment_id,)
+            )
+            conn.commit()
+
+            logger.info(f"✅ Appointment #{appointment_id} cancelled")
+
             return {
-                "success": False,
-                "error": f"Appuntamento #{appointment_id} non trovato o già cancellato."
+                "success": True,
+                "message": f"Appuntamento #{appointment_id} cancellato con successo."
             }
-        
-        # Cancel appointment
-        cur.execute(
-            "UPDATE salon_appointments SET status = 'cancelled' WHERE id = %s",
-            (appointment_id,)
-        )
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"✅ Appointment #{appointment_id} cancelled")
-        
-        return {
-            "success": True,
-            "message": f"Appuntamento #{appointment_id} cancellato con successo."
-        }
-        
+        finally:
+            conn.close()
+
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -401,108 +401,96 @@ def modify_appointment(
         normalized_phone = normalize_phone(customer_phone)
 
         conn = get_db_connection()
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
 
-        # Find the appointment
-        cur.execute(
-            """SELECT id, customer_name, service_type, appointment_date, appointment_time
-               FROM salon_appointments
-               WHERE id = %s AND customer_phone = %s AND status = 'confirmed'""",
-            (appointment_id, normalized_phone)
-        )
-
-        appointment = cur.fetchone()
-        if not appointment:
-            conn.close()
-            return {
-                "success": False,
-                "error": f"Appuntamento #{appointment_id} non trovato. Usa get_customer_appointments per vedere gli appuntamenti attivi."
-            }
-
-        # Current values
-        current_name = appointment[1]
-        current_service = appointment[2]
-        current_date = str(appointment[3])
-        current_time = str(appointment[4])[:5]  # HH:MM format
-
-        # Determine new values (use current if not provided)
-        final_date = new_date if new_date else current_date
-        final_time = new_time if new_time else current_time
-        final_service = new_service.lower() if new_service else current_service
-
-        # Validate new service if changed
-        service = SALON_SERVICES.get(final_service)
-        if not service:
-            conn.close()
-            return {
-                "success": False,
-                "error": f"Servizio non riconosciuto: {final_service}. Servizi: taglio, piega, colore, colpi_sole, trattamento"
-            }
-
-        # Validate new date if changed
-        if new_date:
-            try:
-                parsed_date = datetime.strptime(new_date, "%Y-%m-%d")
-                if parsed_date.date() < datetime.now().date():
-                    conn.close()
-                    return {"success": False, "error": "Non è possibile spostare l'appuntamento nel passato."}
-            except ValueError:
-                conn.close()
-                return {"success": False, "error": f"Formato data non valido: {new_date}. Usa YYYY-MM-DD"}
-
-        # Validate new time if changed
-        if new_time:
-            try:
-                datetime.strptime(new_time, "%H:%M")
-            except ValueError:
-                conn.close()
-                return {"success": False, "error": f"Formato ora non valido: {new_time}. Usa HH:MM"}
-
-        # Check if new slot is available (only if date or time changed)
-        if new_date or new_time:
+            # Find the appointment
             cur.execute(
-                """SELECT COUNT(*) FROM salon_appointments
-                   WHERE appointment_date = %s AND appointment_time = %s
-                   AND status = 'confirmed' AND id != %s""",
-                (final_date, final_time, appointment_id)
+                """SELECT id, customer_name, service_type, appointment_date, appointment_time
+                   FROM salon_appointments
+                   WHERE id = %s AND customer_phone = %s AND status = 'confirmed'""",
+                (appointment_id, normalized_phone)
             )
-            if cur.fetchone()[0] > 0:
-                conn.close()
+
+            appointment = cur.fetchone()
+            if not appointment:
                 return {
                     "success": False,
-                    "error": f"Il {final_date} alle {final_time} è già occupato. Scegli un altro orario."
+                    "error": f"Appuntamento #{appointment_id} non trovato. Usa get_customer_appointments per vedere gli appuntamenti attivi."
                 }
 
-        # Update the appointment
-        cur.execute(
-            """UPDATE salon_appointments
-               SET appointment_date = %s, appointment_time = %s, service_type = %s,
-                   duration_minutes = %s, price = %s
-               WHERE id = %s""",
-            (final_date, final_time, final_service, service["duration"], service["price"], appointment_id)
-        )
+            # Current values
+            current_name = appointment[1]
+            current_service = appointment[2]
+            current_date = str(appointment[3])
+            current_time = str(appointment[4])[:5]  # HH:MM format
 
-        conn.commit()
-        conn.close()
+            # Determine new values (use current if not provided)
+            final_date = new_date if new_date else current_date
+            final_time = new_time if new_time else current_time
+            final_service = new_service.lower() if new_service else current_service
 
-        logger.info(f"✅ Appointment #{appointment_id} modified: {final_date} {final_time} {final_service}")
+            # Validate new service if changed
+            service = SALON_SERVICES.get(final_service)
+            if not service:
+                return {
+                    "success": False,
+                    "error": f"Servizio non riconosciuto: {final_service}. Servizi: taglio, piega, colore, colpi_sole, trattamento"
+                }
 
-        # Build change summary
-        changes = []
-        if new_date and new_date != current_date:
-            changes.append(f"data: {current_date} → {final_date}")
-        if new_time and new_time != current_time:
-            changes.append(f"ora: {current_time} → {final_time}")
-        if new_service and new_service.lower() != current_service.lower():
-            changes.append(f"servizio: {current_service} → {final_service}")
+            # Validate new date and time together (check if in the past)
+            try:
+                final_datetime = datetime.strptime(f"{final_date} {final_time}", "%Y-%m-%d %H:%M")
+                if final_datetime < datetime.now():
+                    return {"success": False, "error": "Non è possibile spostare l'appuntamento nel passato."}
+            except ValueError:
+                return {"success": False, "error": f"Formato data/ora non valido: {final_date} {final_time}"}
 
-        change_text = ", ".join(changes) if changes else "nessuna modifica"
+            # Check if new slot is available (only if date or time changed)
+            if new_date or new_time:
+                cur.execute(
+                    """SELECT COUNT(*) FROM salon_appointments
+                       WHERE appointment_date = %s AND appointment_time = %s
+                       AND status = 'confirmed' AND id != %s""",
+                    (final_date, final_time, appointment_id)
+                )
+                if cur.fetchone()[0] > 0:
+                    return {
+                        "success": False,
+                        "error": f"Il {final_date} alle {final_time} è già occupato. Scegli un altro orario."
+                    }
 
-        return {
-            "success": True,
-            "appointment_id": appointment_id,
-            "message": f"Appuntamento #{appointment_id} modificato! {current_name}: {service['name_it']} il {final_date} alle {final_time}. Modifiche: {change_text}"
-        }
+            # Update the appointment
+            cur.execute(
+                """UPDATE salon_appointments
+                   SET appointment_date = %s, appointment_time = %s, service_type = %s,
+                       duration_minutes = %s, price = %s
+                   WHERE id = %s""",
+                (final_date, final_time, final_service, service["duration"], service["price"], appointment_id)
+            )
+
+            conn.commit()
+
+            logger.info(f"✅ Appointment #{appointment_id} modified: {final_date} {final_time} {final_service}")
+
+            # Build change summary
+            changes = []
+            if new_date and new_date != current_date:
+                changes.append(f"data: {current_date} → {final_date}")
+            if new_time and new_time != current_time:
+                changes.append(f"ora: {current_time} → {final_time}")
+            if new_service and new_service.lower() != current_service.lower():
+                changes.append(f"servizio: {current_service} → {final_service}")
+
+            change_text = ", ".join(changes) if changes else "nessuna modifica"
+
+            return {
+                "success": True,
+                "appointment_id": appointment_id,
+                "message": f"Appuntamento #{appointment_id} modificato! {current_name}: {service['name_it']} il {final_date} alle {final_time}. Modifiche: {change_text}"
+            }
+        finally:
+            conn.close()
 
     except Exception as e:
         logger.error(f"❌ Modify appointment error: {e}")
@@ -517,27 +505,30 @@ def get_available_slots(date: str) -> Dict[str, Any]:
         # Validate date
         try:
             parsed_date = datetime.strptime(date, "%Y-%m-%d")
-            if parsed_date.date() < datetime.now().date():
+            now = datetime.now()
+            if parsed_date.date() < now.date():
                 return {"success": False, "error": "Non posso mostrare disponibilità per date passate."}
+            is_today = parsed_date.date() == now.date()
         except ValueError:
             return {"success": False, "error": f"Formato data non valido: {date}. Usa YYYY-MM-DD"}
 
         conn = get_db_connection()
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
 
-        # Get all booked times for this date
-        cur.execute(
-            """SELECT appointment_time FROM salon_appointments
-               WHERE appointment_date = %s AND status = 'confirmed'""",
-            (date,)
-        )
+            # Get all booked times for this date
+            cur.execute(
+                """SELECT appointment_time FROM salon_appointments
+                   WHERE appointment_date = %s AND status = 'confirmed'""",
+                (date,)
+            )
 
-        booked_times = set()
-        for row in cur.fetchall():
-            # Store as HH:MM string
-            booked_times.add(str(row[0])[:5])
-
-        conn.close()
+            booked_times = set()
+            for row in cur.fetchall():
+                # Store as HH:MM string
+                booked_times.add(str(row[0])[:5])
+        finally:
+            conn.close()
 
         # Generate all possible slots (09:00 to 19:00, every 30 minutes)
         all_slots = []
@@ -547,6 +538,12 @@ def get_available_slots(date: str) -> Dict[str, Any]:
 
         # Filter out booked slots
         available_slots = [slot for slot in all_slots if slot not in booked_times]
+
+        # If today, filter out past times (with 30 min buffer)
+        if is_today:
+            current_time = now + timedelta(minutes=30)
+            current_str = current_time.strftime("%H:%M")
+            available_slots = [slot for slot in available_slots if slot >= current_str]
 
         if not available_slots:
             return {
