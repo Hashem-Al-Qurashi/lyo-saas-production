@@ -52,7 +52,8 @@ DB_CONFIG = {
     "port": int(os.getenv("DB_PORT", "5432")),
     "database": os.getenv("DB_NAME", "lyo_production"),
     "user": os.getenv("DB_USER", "lyoadmin"),
-    "password": os.getenv("DB_PASSWORD")
+    "password": os.getenv("DB_PASSWORD"),
+    "sslmode": "require"
 }
 
 # Google Calendar Configuration
