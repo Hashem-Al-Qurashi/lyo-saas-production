@@ -953,14 +953,21 @@ def execute_function(function_name: str, arguments: str, phone: str) -> Dict[str
 
 conversation_history: Dict[str, List[Dict]] = {}
 
-# Action words that indicate AI claims it did something
+# Action words that indicate AI claims it did/will do something
 ACTION_CLAIM_WORDS = [
-    # English
+    # English - past tense (completed actions)
     "successfully", "confirmed", "booked", "rescheduled", "cancelled", "canceled",
     "modified", "changed", "updated", "done", "completed",
-    # Italian
+    # English - base/present (promises or ongoing)
+    "reschedule", "cancel", "modify", "change", "update", "book",
+    "i will", "i'll", "let me", "i'm going to", "going to reschedule",
+    "make that change", "make the change",
+    # Italian - past
     "confermato", "prenotato", "modificato", "cancellato", "spostato",
-    "cambiato", "aggiornato", "fatto", "completato"
+    "cambiato", "aggiornato", "fatto", "completato",
+    # Italian - promises
+    "modifico", "cancello", "prenoto", "sposto", "cambio",
+    "sto per", "vado a", "procedo"
 ]
 
 # Functions that actually perform actions
@@ -974,13 +981,20 @@ def detect_false_success_claim(response_text: str, function_called: str = None) 
     response_lower = response_text.lower()
 
     # Check if response claims an action was taken
-    claims_action = any(word in response_lower for word in ACTION_CLAIM_WORDS)
+    matched_words = [word for word in ACTION_CLAIM_WORDS if word in response_lower]
+    claims_action = len(matched_words) > 0
 
     # Check if an action function was actually called
     actually_acted = function_called in ACTION_FUNCTIONS if function_called else False
 
+    # Log for debugging
+    if claims_action:
+        logger.info(f"🔍 Validation: Response contains action words: {matched_words}")
+        logger.info(f"🔍 Validation: Function called: {function_called}, Is action function: {actually_acted}")
+
     # If claims action but didn't act, it's a false claim
     if claims_action and not actually_acted:
+        logger.warning(f"⚠️ FALSE CLAIM DETECTED: AI said '{matched_words}' but called '{function_called}'")
         return True
 
     return False
