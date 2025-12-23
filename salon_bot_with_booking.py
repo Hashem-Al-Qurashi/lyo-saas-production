@@ -10,12 +10,19 @@ import psycopg2
 import pytz
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import openai
+
+# Google Calendar imports
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request as GoogleRequest
+from googleapiclient.discovery import build
 
 # Configure logging
 logging.basicConfig(
@@ -47,6 +54,50 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER", "lyoadmin"),
     "password": os.getenv("DB_PASSWORD")
 }
+
+# Google Calendar Configuration
+GOOGLE_CREDS_DIR = Path(os.getenv("GOOGLE_CREDS_DIR", "/home/sakr_quraish/Projects/italian/lyo-saas-clean/google_creds"))
+GOOGLE_CREDENTIALS_FILE = GOOGLE_CREDS_DIR / "credentials.json"
+GOOGLE_TOKEN_FILE = GOOGLE_CREDS_DIR / "token.json"
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]
+GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+ITALY_TZ = pytz.timezone("Europe/Rome")
+
+# Google Calendar Service (initialized lazily)
+_calendar_service = None
+
+def get_calendar_service():
+    """Get or initialize Google Calendar service"""
+    global _calendar_service
+
+    if _calendar_service is not None:
+        return _calendar_service
+
+    try:
+        creds = None
+
+        # Load existing token
+        if GOOGLE_TOKEN_FILE.exists():
+            creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN_FILE), GOOGLE_SCOPES)
+
+        # Refresh or reauthorize if needed
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(GoogleRequest())
+            # Save refreshed token
+            with open(GOOGLE_TOKEN_FILE, 'w') as f:
+                f.write(creds.to_json())
+
+        if not creds or not creds.valid:
+            logger.warning("⚠️ Google Calendar credentials invalid or missing")
+            return None
+
+        _calendar_service = build('calendar', 'v3', credentials=creds)
+        logger.info("✅ Google Calendar service initialized")
+        return _calendar_service
+
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Google Calendar: {e}")
+        return None
 
 # Business Configuration
 BUSINESS_NAME = "Salon Bella Vita"
@@ -143,6 +194,119 @@ def normalize_phone(phone: str) -> str:
     # Remove leading zeros (but keep at least the number)
     digits = digits.lstrip('0') or digits
     return digits
+
+# ============================================================================
+# GOOGLE CALENDAR FUNCTIONS
+# ============================================================================
+
+def create_calendar_event(customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None) -> str:
+    """
+    Create a Google Calendar event for the appointment.
+    Returns: event_id if successful, None if failed
+    """
+    try:
+        service_obj = get_calendar_service()
+        if not service_obj:
+            logger.warning("⚠️ Google Calendar not available, skipping event creation")
+            return None
+
+        # Parse date and time
+        dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        start_dt = ITALY_TZ.localize(dt)
+        end_dt = start_dt + timedelta(minutes=service.get("duration", 60))
+
+        event = {
+            "summary": f"{service.get('name_it', 'Appuntamento')} - {customer_name}",
+            "description": f"Cliente: {customer_name}\nTelefono: {customer_phone or 'N/A'}\nServizio: {service.get('name_it')}\nPrezzo: €{service.get('price', 0)}",
+            "start": {
+                "dateTime": start_dt.isoformat(),
+                "timeZone": "Europe/Rome"
+            },
+            "end": {
+                "dateTime": end_dt.isoformat(),
+                "timeZone": "Europe/Rome"
+            },
+            "reminders": {
+                "useDefault": False,
+                "overrides": [
+                    {"method": "popup", "minutes": 60},
+                    {"method": "popup", "minutes": 15}
+                ]
+            }
+        }
+
+        result = service_obj.events().insert(calendarId=GOOGLE_CALENDAR_ID, body=event).execute()
+        event_id = result.get("id")
+        logger.info(f"✅ Calendar event created: {event_id}")
+        return event_id
+
+    except Exception as e:
+        logger.error(f"❌ Failed to create calendar event: {e}")
+        return None
+
+
+def update_calendar_event(event_id: str, customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None) -> bool:
+    """
+    Update an existing Google Calendar event.
+    Returns: True if successful, False if failed
+    """
+    if not event_id:
+        return False
+
+    try:
+        service_obj = get_calendar_service()
+        if not service_obj:
+            logger.warning("⚠️ Google Calendar not available, skipping event update")
+            return False
+
+        # Parse date and time
+        dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        start_dt = ITALY_TZ.localize(dt)
+        end_dt = start_dt + timedelta(minutes=service.get("duration", 60))
+
+        event = {
+            "summary": f"{service.get('name_it', 'Appuntamento')} - {customer_name}",
+            "description": f"Cliente: {customer_name}\nTelefono: {customer_phone or 'N/A'}\nServizio: {service.get('name_it')}\nPrezzo: €{service.get('price', 0)}",
+            "start": {
+                "dateTime": start_dt.isoformat(),
+                "timeZone": "Europe/Rome"
+            },
+            "end": {
+                "dateTime": end_dt.isoformat(),
+                "timeZone": "Europe/Rome"
+            }
+        }
+
+        service_obj.events().update(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id, body=event).execute()
+        logger.info(f"✅ Calendar event updated: {event_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Failed to update calendar event: {e}")
+        return False
+
+
+def delete_calendar_event(event_id: str) -> bool:
+    """
+    Delete a Google Calendar event.
+    Returns: True if successful, False if failed
+    """
+    if not event_id:
+        return False
+
+    try:
+        service_obj = get_calendar_service()
+        if not service_obj:
+            logger.warning("⚠️ Google Calendar not available, skipping event deletion")
+            return False
+
+        service_obj.events().delete(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id).execute()
+        logger.info(f"✅ Calendar event deleted: {event_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Failed to delete calendar event: {e}")
+        return False
 
 # ============================================================================
 # DATABASE FUNCTIONS
@@ -244,19 +408,29 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                     "error": f"Mi dispiace, il {date} alle {time} è già occupato. Prova un altro orario."
                 }
 
-            # Create appointment
+            # Create Google Calendar event first
+            google_event_id = create_calendar_event(
+                customer_name=customer_name,
+                service=service,
+                date_str=date,
+                time_str=time,
+                customer_phone=normalized_phone
+            )
+
+            # Create appointment with google_event_id
             cur.execute(
                 """INSERT INTO salon_appointments
-                   (customer_phone, customer_name, service_type, appointment_date, appointment_time, duration_minutes, price, status)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'confirmed')
+                   (customer_phone, customer_name, service_type, appointment_date, appointment_time, duration_minutes, price, status, google_event_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'confirmed', %s)
                    RETURNING id""",
-                (normalized_phone, customer_name, service_type, date, time, service["duration"], service["price"])
+                (normalized_phone, customer_name, service_type, date, time, service["duration"], service["price"], google_event_id)
             )
 
             appointment_id = cur.fetchone()[0]
             conn.commit()
 
-            logger.info(f"✅ Appointment created: #{appointment_id} for {customer_name}")
+            calendar_note = " (sincronizzato con calendario)" if google_event_id else ""
+            logger.info(f"✅ Appointment created: #{appointment_id} for {customer_name}{calendar_note}")
 
             return {
                 "success": True,
@@ -353,18 +527,25 @@ def cancel_appointment(customer_phone: str, appointment_id: int) -> Dict[str, An
         try:
             cur = conn.cursor()
 
-            # Verify appointment belongs to customer
+            # Verify appointment belongs to customer and get google_event_id
             cur.execute(
-                """SELECT id FROM salon_appointments
+                """SELECT id, google_event_id FROM salon_appointments
                    WHERE id = %s AND customer_phone = %s AND status = 'confirmed'""",
                 (appointment_id, normalized_phone)
             )
 
-            if not cur.fetchone():
+            row = cur.fetchone()
+            if not row:
                 return {
                     "success": False,
                     "error": f"Appuntamento #{appointment_id} non trovato o già cancellato."
                 }
+
+            google_event_id = row[1]
+
+            # Delete from Google Calendar
+            if google_event_id:
+                delete_calendar_event(google_event_id)
 
             # Cancel appointment
             cur.execute(
@@ -373,7 +554,8 @@ def cancel_appointment(customer_phone: str, appointment_id: int) -> Dict[str, An
             )
             conn.commit()
 
-            logger.info(f"✅ Appointment #{appointment_id} cancelled")
+            calendar_note = " (rimosso dal calendario)" if google_event_id else ""
+            logger.info(f"✅ Appointment #{appointment_id} cancelled{calendar_note}")
 
             return {
                 "success": True,
@@ -406,7 +588,7 @@ def modify_appointment(
 
             # Find the appointment
             cur.execute(
-                """SELECT id, customer_name, service_type, appointment_date, appointment_time
+                """SELECT id, customer_name, service_type, appointment_date, appointment_time, google_event_id
                    FROM salon_appointments
                    WHERE id = %s AND customer_phone = %s AND status = 'confirmed'""",
                 (appointment_id, normalized_phone)
@@ -424,6 +606,7 @@ def modify_appointment(
             current_service = appointment[2]
             current_date = str(appointment[3])
             current_time = str(appointment[4])[:5]  # HH:MM format
+            google_event_id = appointment[5]
 
             # Determine new values (use current if not provided)
             final_date = new_date if new_date else current_date
@@ -471,7 +654,19 @@ def modify_appointment(
 
             conn.commit()
 
-            logger.info(f"✅ Appointment #{appointment_id} modified: {final_date} {final_time} {final_service}")
+            # Update Google Calendar event
+            if google_event_id:
+                update_calendar_event(
+                    event_id=google_event_id,
+                    customer_name=current_name,
+                    service=service,
+                    date_str=final_date,
+                    time_str=final_time,
+                    customer_phone=normalized_phone
+                )
+
+            calendar_note = " (calendario aggiornato)" if google_event_id else ""
+            logger.info(f"✅ Appointment #{appointment_id} modified: {final_date} {final_time} {final_service}{calendar_note}")
 
             # Build change summary
             changes = []
