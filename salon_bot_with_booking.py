@@ -1042,15 +1042,94 @@ def get_ai_response(phone: str, message: str) -> str:
             second_response = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=messages,
+                functions=BOOKING_FUNCTIONS,
+                function_call="auto",
                 temperature=0.7
             )
-            
-            final_message = second_response['choices'][0]['message']['content']
-            
+
+            second_message = second_response['choices'][0]['message']
+
+            # Check if second response wants to call another function
+            if second_message.get('function_call'):
+                # AI wants to call another function - execute it
+                func2_name = second_message['function_call']['name']
+                func2_args = second_message['function_call']['arguments']
+
+                logger.info(f"🔧 AI calling second function: {func2_name}")
+                logger.info(f"   Args: {func2_args}")
+
+                func2_result = execute_function(func2_name, func2_args, phone)
+                logger.info(f"   Result: {func2_result}")
+
+                messages.append(second_message)
+                messages.append({
+                    "role": "function",
+                    "name": func2_name,
+                    "content": json.dumps(func2_result)
+                })
+
+                # Get third response
+                third_response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=messages,
+                    temperature=0.7
+                )
+                final_message = third_response['choices'][0]['message']['content']
+
+                # Update which function was actually called for validation
+                function_name = func2_name
+            else:
+                final_message = second_message.get('content', '')
+
+            # Validate: AI might claim success after calling get_customer_appointments (wrong function)
+            if detect_false_success_claim(final_message, function_called=function_name):
+                logger.warning(f"⚠️ AI hallucination after {function_name}! Claimed action success but called wrong function. Retrying...")
+
+                messages.append({"role": "assistant", "content": final_message})
+                messages.append({"role": "user", "content": RETRY_PROMPT})
+
+                retry_response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=messages,
+                    functions=BOOKING_FUNCTIONS,
+                    function_call="auto",
+                    temperature=0.3
+                )
+
+                retry_message = retry_response['choices'][0]['message']
+
+                if retry_message.get('function_call'):
+                    retry_func = retry_message['function_call']['name']
+                    retry_args = retry_message['function_call']['arguments']
+
+                    logger.info(f"🔧 RETRY - AI calling function: {retry_func}")
+                    logger.info(f"   Args: {retry_args}")
+
+                    retry_result = execute_function(retry_func, retry_args, phone)
+                    logger.info(f"   Result: {retry_result}")
+
+                    messages.append(retry_message)
+                    messages.append({
+                        "role": "function",
+                        "name": retry_func,
+                        "content": json.dumps(retry_result)
+                    })
+
+                    final_resp = openai.ChatCompletion.create(
+                        model="gpt-3.5-turbo",
+                        messages=messages,
+                        temperature=0.7
+                    )
+                    final_message = final_resp['choices'][0]['message']['content']
+                    logger.info(f"✅ Retry successful after wrong function")
+                else:
+                    logger.error(f"❌ Retry failed after wrong function")
+                    final_message = "Mi dispiace, c'è stato un problema. Puoi ripetere cosa vuoi fare? (prenotare, modificare o cancellare)"
+
             # Save to history
             conversation_history[phone].append({"role": "user", "content": message})
             conversation_history[phone].append({"role": "assistant", "content": final_message})
-            
+
             return final_message
         
         else:
