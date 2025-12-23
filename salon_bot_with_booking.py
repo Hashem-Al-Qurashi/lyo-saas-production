@@ -953,8 +953,49 @@ def execute_function(function_name: str, arguments: str, phone: str) -> Dict[str
 
 conversation_history: Dict[str, List[Dict]] = {}
 
+# Action words that indicate AI claims it did something
+ACTION_CLAIM_WORDS = [
+    # English
+    "successfully", "confirmed", "booked", "rescheduled", "cancelled", "canceled",
+    "modified", "changed", "updated", "done", "completed",
+    # Italian
+    "confermato", "prenotato", "modificato", "cancellato", "spostato",
+    "cambiato", "aggiornato", "fatto", "completato"
+]
+
+# Functions that actually perform actions
+ACTION_FUNCTIONS = ["create_appointment", "modify_appointment", "cancel_appointment"]
+
+def detect_false_success_claim(response_text: str, function_called: str = None) -> bool:
+    """
+    Detect if AI claims success but didn't actually call an action function.
+    Returns True if AI is lying (claimed action but didn't do it).
+    """
+    response_lower = response_text.lower()
+
+    # Check if response claims an action was taken
+    claims_action = any(word in response_lower for word in ACTION_CLAIM_WORDS)
+
+    # Check if an action function was actually called
+    actually_acted = function_called in ACTION_FUNCTIONS if function_called else False
+
+    # If claims action but didn't act, it's a false claim
+    if claims_action and not actually_acted:
+        return True
+
+    return False
+
+RETRY_PROMPT = """⚠️ ERRORE CRITICO: Hai detto che l'azione è stata completata MA NON HAI CHIAMATO LA FUNZIONE!
+
+DEVI chiamare la funzione appropriata ORA:
+- Per prenotare: chiama create_appointment
+- Per modificare: chiama modify_appointment
+- Per cancellare: chiama cancel_appointment
+
+NON rispondere senza chiamare la funzione. Il cliente sta aspettando."""
+
 def get_ai_response(phone: str, message: str) -> str:
-    """Get AI response with function calling"""
+    """Get AI response with function calling and validation"""
     try:
         # Get or create conversation history
         if phone not in conversation_history:
@@ -1013,15 +1054,66 @@ def get_ai_response(phone: str, message: str) -> str:
             return final_message
         
         else:
-            # No function call, just return response
+            # No function call - check if AI falsely claims success
             response_text = assistant_message['content']
-            
+
+            # Validate: did AI claim action without calling function?
+            if detect_false_success_claim(response_text, function_called=None):
+                logger.warning(f"⚠️ AI hallucination detected! Claimed success without function call. Retrying...")
+
+                # Retry with stronger prompt
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append({"role": "user", "content": RETRY_PROMPT})
+
+                retry_response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=messages,
+                    functions=BOOKING_FUNCTIONS,
+                    function_call="auto",
+                    temperature=0.3  # Lower temperature for more predictable behavior
+                )
+
+                retry_message = retry_response['choices'][0]['message']
+
+                # Check if retry called a function
+                if retry_message.get('function_call'):
+                    function_name = retry_message['function_call']['name']
+                    function_args = retry_message['function_call']['arguments']
+
+                    logger.info(f"🔧 RETRY - AI calling function: {function_name}")
+                    logger.info(f"   Args: {function_args}")
+
+                    # Execute the function
+                    function_result = execute_function(function_name, function_args, phone)
+                    logger.info(f"   Result: {function_result}")
+
+                    # Get final response
+                    messages.append(retry_message)
+                    messages.append({
+                        "role": "function",
+                        "name": function_name,
+                        "content": json.dumps(function_result)
+                    })
+
+                    final_response = openai.ChatCompletion.create(
+                        model="gpt-3.5-turbo",
+                        messages=messages,
+                        temperature=0.7
+                    )
+
+                    response_text = final_response['choices'][0]['message']['content']
+                    logger.info(f"✅ Retry successful - function was called")
+                else:
+                    # Retry also failed to call function - give honest error
+                    logger.error(f"❌ Retry failed - AI still didn't call function")
+                    response_text = "Mi dispiace, c'è stato un problema. Puoi ripetere cosa vuoi fare? (prenotare, modificare o cancellare)"
+
             # Save to history
             conversation_history[phone].append({"role": "user", "content": message})
             conversation_history[phone].append({"role": "assistant", "content": response_text})
-            
+
             return response_text
-    
+
     except Exception as e:
         logger.error(f"❌ AI Error: {e}")
         return "Mi dispiace, ho avuto un problema tecnico. Puoi riprovare?"
