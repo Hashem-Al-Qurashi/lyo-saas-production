@@ -164,15 +164,21 @@ FLUSSO DI PRENOTAZIONE:
    - modify_appointment: Modifica/sposta un appuntamento esistente
    - cancel_appointment: Cancella una prenotazione
 
-4. MODIFICA/CANCELLAZIONE:
-   - Se il cliente vuole modificare o cancellare MA non specifica quale appuntamento:
-     → Chiama PRIMA get_customer_appointments per vedere i suoi appuntamenti
-     → Se ha UN SOLO appuntamento, usa quello
-     → Se ha PIÙ appuntamenti, chiedi quale vuole modificare/cancellare
+4. MODIFICA/CANCELLAZIONE (SII DIRETTO - NON CHIEDERE CONFERMA RIPETUTAMENTE):
+   - Se il cliente vuole modificare o cancellare:
+     → Chiama get_customer_appointments per vedere i suoi appuntamenti
+     → Se ha UN SOLO appuntamento, PROCEDI SUBITO senza chiedere conferma
+     → Se ha PIÙ appuntamenti, chiedi UNA SOLA VOLTA quale vuole modificare/cancellare
+     → Quando il cliente risponde (es: "quello di oggi", "il primo", "yes"), ESEGUI SUBITO l'azione
+     → NON chiedere conferma multiple volte - una risposta positiva è sufficiente!
    - Per modificare: chiama modify_appointment con l'ID e i nuovi valori
    - Per cancellare: chiama cancel_appointment con l'ID
 
-5. SII ONESTA:
+5. FORMATO ORARIO:
+   - Mostra sempre gli orari in formato 12h (es: "6:00 PM" invece di "18:00")
+   - Accetta input sia in 12h che 24h dal cliente
+
+6. SII ONESTA:
    - Conferma solo se la funzione ritorna success=True
    - Se errore o non disponibile, comunica chiaramente
 
@@ -470,21 +476,33 @@ def check_availability(date: str, time: str) -> Dict[str, Any]:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+def format_time_12h(time_str: str) -> str:
+    """Convert 24h time (HH:MM) to 12h format (h:MM AM/PM)"""
+    try:
+        time_obj = datetime.strptime(str(time_str)[:5], "%H:%M")
+        return time_obj.strftime("%I:%M %p").lstrip("0")  # "6:00 PM" not "06:00 PM"
+    except:
+        return str(time_str)[:5]
+
 def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
-    """Get all appointments for a customer"""
+    """Get all FUTURE appointments for a customer (filters out past appointments)"""
     try:
         # Normalize phone
         normalized_phone = normalize_phone(customer_phone)
+        now = datetime.now()
+        today = now.date()
 
         conn = get_db_connection()
         try:
             cur = conn.cursor()
+            # Only get future appointments (today with future time, or future dates)
             cur.execute(
                 """SELECT id, customer_name, service_type, appointment_date, appointment_time, price, status
                    FROM salon_appointments
                    WHERE customer_phone = %s AND status = 'confirmed'
+                   AND (appointment_date > %s OR (appointment_date = %s AND appointment_time > %s))
                    ORDER BY appointment_date, appointment_time""",
-                (normalized_phone,)
+                (normalized_phone, today, today, now.strftime("%H:%M"))
             )
 
             appointments = []
@@ -495,7 +513,7 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
                     "customer_name": row[1],
                     "service": service.get("name_it", row[2]),
                     "date": str(row[3]),
-                    "time": str(row[4]),
+                    "time": format_time_12h(row[4]),
                     "price": float(row[5]) if row[5] else 0,
                     "status": row[6]
                 })
