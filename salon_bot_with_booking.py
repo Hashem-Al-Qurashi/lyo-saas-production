@@ -1,12 +1,13 @@
 """
-SALON BELLA VITA - WhatsApp Bot with Calendar/Booking Integration
-OpenAI 0.28.x compatible with function calling
+AURA HAIR STUDIO - WhatsApp Bot with Calendar/Booking Integration
+OpenAI Tools API with strict mode for reliable function calling
 """
 import os
 import asyncio
 import logging
 import json
 import psycopg2
+import psycopg2.errors
 import pytz
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
@@ -39,7 +40,28 @@ logger = logging.getLogger(__name__)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY environment variable is required")
-openai.api_key = OPENAI_API_KEY
+
+# Detect OpenAI SDK version and initialize appropriately
+def get_openai_version():
+    """Get OpenAI SDK major version"""
+    try:
+        version_str = openai.__version__
+        major = int(version_str.split('.')[0])
+        return major
+    except:
+        return 0
+
+OPENAI_SDK_VERSION = get_openai_version()
+logger.info(f"OpenAI SDK version: {openai.__version__} (major: {OPENAI_SDK_VERSION})")
+
+# Initialize client based on SDK version
+if OPENAI_SDK_VERSION >= 1:
+    # New SDK v1.0+ syntax
+    openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+else:
+    # Old SDK v0.x syntax
+    openai.api_key = OPENAI_API_KEY
+    openai_client = None  # Use module-level calls for old SDK
 
 # WhatsApp Configuration - MUST be set via environment variables
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
@@ -101,16 +123,18 @@ def get_calendar_service():
         return None
 
 # Business Configuration
-BUSINESS_NAME = "Salon Bella Vita"
+BUSINESS_NAME = "Aura Hair Studio"
 BUSINESS_TYPE = "beauty_salon"
 
 # Salon Services
 SALON_SERVICES = {
-    "taglio": {"name_it": "Taglio Donna", "name_en": "Women's Haircut", "price": 35, "duration": 60},
-    "piega": {"name_it": "Piega", "name_en": "Styling", "price": 20, "duration": 30},
-    "colore": {"name_it": "Colore", "name_en": "Coloring", "price": 80, "duration": 120},
-    "colpi_sole": {"name_it": "Colpi di Sole", "name_en": "Highlights", "price": 60, "duration": 90},
-    "trattamento": {"name_it": "Trattamento", "name_en": "Treatment", "price": 25, "duration": 30}
+    "taglio_donna": {"name_it": "Taglio Donna", "name_en": "Women's Haircut", "price": 60, "duration": 45},
+    "taglio_uomo": {"name_it": "Taglio Uomo", "name_en": "Men's Haircut", "price": 40, "duration": 45},
+    "piega": {"name_it": "Piega", "name_en": "Styling/Blow-dry", "price": 30, "duration": 30},
+    "colore_base": {"name_it": "Colore Base", "name_en": "Basic Color", "price": 70, "duration": 90},
+    "balayage": {"name_it": "Balayage/Schiariture", "name_en": "Balayage/Highlights", "price": 130, "duration": 150},
+    "trattamento_ristrutturante": {"name_it": "Trattamento Ristrutturante", "name_en": "Restructuring Treatment", "price": 45, "duration": 45},
+    "trattamento_cute": {"name_it": "Trattamento Cute", "name_en": "Scalp Treatment", "price": 40, "duration": 30}
 }
 
 # Get today's date for the prompt
@@ -118,74 +142,158 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 TOMORROW = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
 # System prompt with booking capabilities
-SYSTEM_PROMPT = f"""Sei Lyo, la receptionist virtuale del Salon Bella Vita a Milano.
-Sei cordiale, professionale e disponibile. Aiuti i clienti a prenotare appuntamenti per servizi di parrucchiere.
+SYSTEM_PROMPT = f"""You are Simone, an employee at Aura Hair Studio in Milan, Italy.
 
-📅 OGGI È: {datetime.now().strftime('%A %d %B %Y')} ({TODAY})
-📅 DOMANI È: {(datetime.now() + timedelta(days=1)).strftime('%A %d %B %Y')} ({TOMORROW})
+══════════════════════════════════════════════════════════════
+🌐 LANGUAGE RULE #1 - THIS IS THE MOST IMPORTANT RULE:
+══════════════════════════════════════════════════════════════
+   - DETECT the customer's language from their FIRST message
+   - English message (hi, hello, book, haircut, etc.) → REPLY IN ENGLISH ONLY
+   - Italian message (ciao, buongiorno, prenotare, taglio, etc.) → REPLY IN ITALIAN ONLY
+   - NEVER MIX LANGUAGES! NEVER SWITCH LANGUAGES!
+   - If customer says "Book haircut Monday" → Reply in ENGLISH: "Sorry, we're closed on Monday"
+   - If customer says "Prenota taglio lunedì" → Reply in ITALIAN: "Mi dispiace, siamo chiusi il lunedì"
+══════════════════════════════════════════════════════════════
 
-📍 INFORMAZIONI SALONE:
-- Indirizzo: Via Roma 123, Milano
-- Telefono: +39 02 1234567
+🚫 IDENTITY RULE:
+   - You are Simone, a HUMAN employee - NEVER reveal you are AI/bot
+   - If asked "are you a bot?" → "No, I'm Simone!" or "No way, I'm real!"
+   - FORBIDDEN WORDS: artificial, virtual, chatbot, language model
+   - Speak naturally as a real salon employee
 
-💇 SERVIZI DISPONIBILI:
-- Taglio Donna: €35 (60 min) - codice: "taglio"
-- Piega: €20 (30 min) - codice: "piega"
-- Colore: €80 (120 min) - codice: "colore"
-- Colpi di Sole: €60 (90 min) - codice: "colpi_sole"
-- Trattamento: €25 (30 min) - codice: "trattamento"
+📅 CURRENT DATE INFO:
+   - TODAY: {datetime.now().strftime('%A %d %B %Y')} ({TODAY})
+   - TOMORROW: {(datetime.now() + timedelta(days=1)).strftime('%A %d %B %Y')} ({TOMORROW})
 
-🕐 ORARI DI APERTURA:
-- Lunedì: 09:00-19:00
-- Martedì: 09:00-19:00
-- Mercoledì: CHIUSO
-- Giovedì: 09:00-19:00
-- Venerdì: 09:00-20:00
-- Sabato: 09:00-18:00
-- Domenica: CHIUSO
+📍 SALON INFO:
+- Name: Aura Hair Studio
+- Address: Via dei Giardini 24, 20121 Milano (MI)
+- Phone: +39 02 8394 5621
+- Email: info@aurahairstudio.it
+- Style: Modern, minimal salon specializing in personalized cuts, color, and professional hair treatments
 
-FLUSSO DI PRENOTAZIONE:
-1. RACCOGLI INFO:
-   - Nome del cliente
-   - Servizio desiderato (taglio, piega, colore, etc.)
-   - Data preferita (converti "domani" in {TOMORROW})
-   - Ora preferita (usa formato 24h: 15:00 per le 3 del pomeriggio)
+💇 SERVICES (English / Italian):
+- Women's Haircut / Taglio Donna: €60 (45 min) - code: "taglio_donna"
+- Men's Haircut / Taglio Uomo: €40 (45 min) - code: "taglio_uomo"
+- Styling/Blow-dry / Piega: €30 (30 min) - code: "piega"
+- Basic Color / Colore Base: €70 (90 min) - code: "colore_base"
+- Balayage/Highlights / Balayage/Schiariture: €130 (2h 30min) - code: "balayage"
+- Restructuring Treatment / Trattamento Ristrutturante: €45 (45 min) - code: "trattamento_ristrutturante"
+- Scalp Treatment / Trattamento Cute: €40 (30 min) - code: "trattamento_cute"
 
-2. CONFERMA UNA VOLTA:
-   - Dopo aver raccolto tutto, conferma: "Perfetto! Riepilogo: [Nome], [Servizio] il [Data] alle [Ora]. Confermo la prenotazione?"
-   - Aspetta la conferma (sì/ok/perfetto/confermo)
-   - POI chiama create_appointment
+⚠️ If customer asks for a service we DON'T offer (perm, extensions, keratin, etc.):
+   → Say "We don't offer [service], but we have: Taglio Donna, Taglio Uomo, Piega, Colore Base, Balayage, Trattamento Ristrutturante, Trattamento Cute"
+   → Always list the actual service names!
 
-3. USA LE FUNZIONI:
-   - create_appointment: Prenota l'appuntamento (solo dopo conferma!)
-   - check_availability: Verifica se un orario specifico è disponibile
-   - get_available_slots: Mostra TUTTI gli orari disponibili per una data
-   - get_customer_appointments: Mostra le prenotazioni del cliente
-   - modify_appointment: Modifica/sposta un appuntamento esistente
-   - cancel_appointment: Cancella una prenotazione
+🕐 BUSINESS HOURS:
+══════════════════════════════════════════════════════════════
+   CLOSED DAYS: Monday and Sunday ONLY
+   OPEN DAYS: Tuesday, Wednesday, Thursday, Friday, Saturday
+══════════════════════════════════════════════════════════════
+   - Tuesday to Friday: 9:00 AM - 6:00 PM (09:00-18:00)
+   - Saturday: 9:00 AM - 5:00 PM (09:00-17:00)
 
-4. MODIFICA/CANCELLAZIONE:
-   - Se il cliente vuole modificare o cancellare:
-     → Chiama get_customer_appointments per vedere i suoi appuntamenti
-     → Se ha UN SOLO appuntamento, PROCEDI SUBITO
-     → Se ha PIÙ appuntamenti, chiedi UNA SOLA VOLTA quale
-   - Per modificare: DEVI chiamare modify_appointment(customer_phone, appointment_id, new_date, new_time)
-   - Per cancellare: DEVI chiamare cancel_appointment(customer_phone, appointment_id)
+   ⚠️ FRIDAY IS DEFINITELY OPEN (9am-6pm)!
+   ⚠️ If customer asks for after 6pm → Say "We close at 6pm, latest slot is around 5pm"
 
-5. FORMATO ORARIO:
-   - Mostra sempre gli orari in formato 12h (es: "6:00 PM" invece di "18:00")
-   - Accetta input sia in 12h che 24h dal cliente
-   - Converti sempre in formato 24h quando chiami le funzioni (es: "10 AM" → "10:00", "6 PM" → "18:00")
+   🎄 HOLIDAY CLOSURES (ONLY these days):
+   - December 25 (Christmas Day) - CLOSED
+   - January 1 (New Year's Day) - CLOSED
+   - ALL OTHER DAYS follow normal schedule!
+   - December 26 is a NORMAL Friday - OPEN!
+   - December 27 is a NORMAL Saturday - OPEN!
 
-⚠️ REGOLA CRITICA - MAI MENTIRE:
-   - NON DIRE MAI "fatto", "confermato", "modificato", "cancellato" SENZA aver chiamato la funzione!
-   - DEVI chiamare la funzione (create_appointment, modify_appointment, cancel_appointment)
-   - SOLO DOPO che la funzione ritorna success=True puoi confermare al cliente
-   - Se non chiami la funzione, NON è stato fatto niente!
-   - Esempio SBAGLIATO: dire "ho modificato" senza chiamare modify_appointment
-   - Esempio CORRETTO: chiamare modify_appointment, vedere success=True, poi dire "modificato"
+📱 PHONE NUMBER RULE - CRITICAL:
+   - You ALREADY have the customer's phone number from WhatsApp
+   - When customer wants to modify/cancel → IMMEDIATELY call get_customer_appointments
+   - NEVER ask "what's your name?" or "what's your phone?" for modify/cancel
+   - Just look up their appointments directly using the tool!
 
-Rispondi naturalmente come una vera receptionist. Se il cliente parla inglese, rispondi in inglese."""
+BOOKING FLOW:
+1. COLLECT INFO (only for NEW bookings):
+   - Customer name
+   - Desired service (taglio_donna, taglio_uomo, piega, colore_base, balayage, etc.)
+   - Preferred date (convert "tomorrow" to {TOMORROW})
+   - Preferred time (use 24h format: 15:00 for 3 PM)
+
+2. CONFIRM ONCE:
+   - After collecting everything, confirm: "Perfect! Summary: [Name], [Service] on [Date] at [Time]. Should I confirm the booking?"
+   - Wait for confirmation (yes/ok/confirm)
+   - THEN call create_appointment
+
+3. USE FUNCTIONS:
+   - create_appointment: Book the appointment (only after confirmation!)
+   - check_availability: Check if a specific time slot is available
+   - get_available_slots: Show ALL available times for a date
+   - get_customer_appointments: Show customer's bookings
+   - modify_appointment: Change/reschedule an existing appointment
+   - cancel_appointment: Cancel a booking
+
+4. MODIFY/CANCEL - IMPORTANT:
+   - If customer wants to modify or cancel:
+     → Call get_customer_appointments to see their appointments
+     → If they have ONE appointment, PROCEED IMMEDIATELY with the action
+     → If they have MULTIPLE appointments, ask ONCE which one
+
+   - MODIFY RULE: If customer says "reschedule to 4pm" or "move it to 3pm":
+     → They already specified the new time! Don't ask again!
+     → Call modify_appointment IMMEDIATELY with the new time
+     → DON'T ask "would you like to reschedule to 4pm?" - just DO IT!
+
+   - CONFLICTING TIMES: If customer says "3pm no wait 4pm actually 5pm":
+     → Use the LAST time mentioned (5pm in this example)
+     → Call modify_appointment with that final time
+     → Don't check all times - just use the last one they said
+
+   - To modify: MUST call modify_appointment(appointment_id, new_date, new_time, new_service)
+   - To cancel: MUST call cancel_appointment(appointment_id)
+
+5. TIME FORMAT:
+   - Always show times in 12h format (e.g., "6:00 PM" instead of "18:00")
+   - Accept input in both 12h and 24h from customer
+   - Always convert to 24h format when calling functions (e.g., "10 AM" → "10:00", "6 PM" → "18:00")
+
+⚠️ CRITICAL RULE - NEVER LIE:
+   - NEVER say "done", "confirmed", "modified", "cancelled" WITHOUT calling the tool!
+   - You MUST call the tool (create_appointment, modify_appointment, cancel_appointment)
+   - ONLY AFTER the tool returns success=True can you confirm to the customer
+   - If you don't call the tool, NOTHING was done!
+   - WRONG example: saying "I modified it" without calling modify_appointment
+   - CORRECT example: call modify_appointment, see success=True, then say "modified"
+
+🔧 AVAILABLE TOOLS - YOU MUST USE THESE:
+   You have access to these tools. To perform ANY booking action, you MUST call the appropriate tool:
+
+   1. create_appointment(customer_name, service_type, date, time)
+      → Call when: Customer confirms a booking
+      → NEVER just say "booked" - you MUST call this tool
+
+   2. get_customer_appointments()
+      → Call when: Customer wants to see, modify, or cancel appointments
+      → Returns appointment 'id' needed for modify/cancel
+
+   3. modify_appointment(appointment_id, new_date, new_time, new_service)
+      → Call when: Customer wants to reschedule or change service
+      → Use null for fields that shouldn't change
+      → NEVER just say "rescheduled" - you MUST call this tool
+
+   4. cancel_appointment(appointment_id)
+      → Call when: Customer confirms they want to cancel
+      → NEVER just say "cancelled" - you MUST call this tool
+
+   5. check_availability(date, time)
+      → Call when: Need to verify a specific slot is free
+
+   6. get_available_slots(date)
+      → Call when: Customer asks what times are available
+
+   ⚡ ACTION = TOOL CALL
+   If customer says "reschedule to 3pm" → CALL modify_appointment
+   If customer says "cancel my appointment" → CALL cancel_appointment
+   If customer says "yes, book it" → CALL create_appointment
+   TALKING about doing something is NOT the same as DOING it!
+
+Respond naturally and warmly like a real salon employee named Simone."""
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -370,6 +478,95 @@ def initialize_database():
         return False
 
 # ============================================================================
+# BUSINESS HOURS VALIDATION
+# ============================================================================
+
+def validate_business_day_and_time(date_str: str, time_str: str = None) -> Dict[str, Any]:
+    """
+    Validate that the date/time falls within business hours.
+
+    Business Rules:
+    - CLOSED: Monday (weekday 0) and Sunday (weekday 6)
+    - OPEN: Tuesday-Friday 9:00-18:00
+    - OPEN: Saturday 9:00-17:00
+    - HOLIDAYS CLOSED: December 25, January 1
+
+    Returns: {"valid": True} or {"valid": False, "error": str, "error_code": str}
+    """
+    try:
+        parsed_date = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return {"valid": False, "error": "Invalid date format", "error_code": "INVALID_DATE_FORMAT"}
+
+    weekday = parsed_date.weekday()  # Monday=0, Sunday=6
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    day_names_it = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+
+    # Check for holidays (December 25 and January 1)
+    month_day = (parsed_date.month, parsed_date.day)
+    if month_day == (12, 25):
+        return {
+            "valid": False,
+            "error": "We are closed on Christmas Day (December 25)",
+            "error_it": "Siamo chiusi il giorno di Natale (25 dicembre)",
+            "error_code": "CLOSED_HOLIDAY_CHRISTMAS"
+        }
+    if month_day == (1, 1):
+        return {
+            "valid": False,
+            "error": "We are closed on New Year's Day (January 1)",
+            "error_it": "Siamo chiusi il giorno di Capodanno (1 gennaio)",
+            "error_code": "CLOSED_HOLIDAY_NEWYEAR"
+        }
+
+    # Check for closed days (Monday and Sunday)
+    if weekday == 0:  # Monday
+        return {
+            "valid": False,
+            "error": f"We are closed on Mondays. We're open Tuesday-Saturday.",
+            "error_it": f"Siamo chiusi il lunedì. Siamo aperti da martedì a sabato.",
+            "error_code": "CLOSED_MONDAY"
+        }
+    if weekday == 6:  # Sunday
+        return {
+            "valid": False,
+            "error": f"We are closed on Sundays. We're open Tuesday-Saturday.",
+            "error_it": f"Siamo chiusi la domenica. Siamo aperti da martedì a sabato.",
+            "error_code": "CLOSED_SUNDAY"
+        }
+
+    # Business hours validation - COMMENTED OUT until client confirms hours
+    # if time_str:
+    #     try:
+    #         parsed_time = datetime.strptime(time_str, "%H:%M")
+    #         hour = parsed_time.hour
+    #         minute = parsed_time.minute
+    #     except ValueError:
+    #         return {"valid": False, "error": "Invalid time format", "error_code": "INVALID_TIME_FORMAT"}
+    #
+    #     # Saturday hours: 9:00-17:00
+    #     if weekday == 5:  # Saturday
+    #         if hour < 9 or (hour >= 17):
+    #             return {
+    #                 "valid": False,
+    #                 "error": f"On Saturdays we're open 9:00-17:00. {time_str} is outside our hours.",
+    #                 "error_it": f"Il sabato siamo aperti dalle 9:00 alle 17:00. {time_str} è fuori orario.",
+    #                 "error_code": "OUTSIDE_SATURDAY_HOURS"
+    #             }
+    #     else:
+    #         # Tuesday-Friday hours: 9:00-18:00
+    #         if hour < 9 or (hour >= 18):
+    #             return {
+    #                 "valid": False,
+    #                 "error": f"We're open 9:00-18:00 on {day_names[weekday]}. {time_str} is outside our hours.",
+    #                 "error_it": f"Siamo aperti dalle 9:00 alle 18:00 il {day_names_it[weekday]}. {time_str} è fuori orario.",
+    #                 "error_code": "OUTSIDE_BUSINESS_HOURS"
+    #             }
+
+    return {"valid": True}
+
+
+# ============================================================================
 # BOOKING FUNCTIONS (Called by AI)
 # ============================================================================
 
@@ -381,7 +578,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
 
         # Validate customer name
         if not customer_name or not customer_name.strip():
-            return {"success": False, "error": "Nome cliente richiesto."}
+            return {"success": False, "error": "CUSTOMER_NAME_REQUIRED"}
         customer_name = customer_name.strip()
 
         # Validate service
@@ -389,17 +586,31 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
         if not service:
             return {
                 "success": False,
-                "error": f"Servizio non riconosciuto: {service_type}. Servizi disponibili: taglio, piega, colore, colpi_sole, trattamento"
+                "error": "INVALID_SERVICE",
+                "provided": service_type,
+                "valid_services": list(SALON_SERVICES.keys())
             }
 
         # Validate date and time together (check if in the past)
         try:
             appointment_datetime = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
             if appointment_datetime < datetime.now():
-                return {"success": False, "error": "Non è possibile prenotare nel passato."}
+                return {"success": False, "error": "PAST_DATE_NOT_ALLOWED"}
         except ValueError:
-            return {"success": False, "error": f"Formato data/ora non valido: {date} {time}. Usa YYYY-MM-DD e HH:MM"}
-        
+            return {"success": False, "error": "INVALID_DATE_TIME_FORMAT", "provided_date": date, "provided_time": time}
+
+        # Validate business hours, closed days, and holidays
+        business_validation = validate_business_day_and_time(date, time)
+        if not business_validation["valid"]:
+            return {
+                "success": False,
+                "error": business_validation["error_code"],
+                "message": business_validation["error"],
+                "message_it": business_validation.get("error_it", ""),
+                "date": date,
+                "time": time
+            }
+
         conn = get_db_connection()
         try:
             cur = conn.cursor()
@@ -415,7 +626,9 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             if count > 0:
                 return {
                     "success": False,
-                    "error": f"Mi dispiace, il {date} alle {time} è già occupato. Prova un altro orario."
+                    "error": "SLOT_ALREADY_BOOKED",
+                    "date": date,
+                    "time": time
                 }
 
             # Create Google Calendar event first
@@ -439,20 +652,35 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             appointment_id = cur.fetchone()[0]
             conn.commit()
 
-            calendar_note = " (sincronizzato con calendario)" if google_event_id else ""
+            calendar_note = " (synced to calendar)" if google_event_id else ""
             logger.info(f"✅ Appointment created: #{appointment_id} for {customer_name}{calendar_note}")
 
             return {
                 "success": True,
                 "appointment_id": appointment_id,
-                "message": f"Prenotazione confermata! Appuntamento #{appointment_id}: {customer_name}, {service['name_it']} il {date} alle {time}. Costo: €{service['price']}"
+                "customer_name": customer_name,
+                "service": service['name_it'],
+                "service_en": service.get('name_en', service_type),
+                "date": date,
+                "time": time,
+                "price": service['price'],
+                "calendar_synced": bool(google_event_id)
             }
         finally:
             conn.close()
 
+    except psycopg2.errors.UniqueViolation:
+        # Race condition: slot was taken between check and insert
+        logger.warning(f"⚠️ Race condition: slot {date} {time} taken by another booking")
+        return {
+            "success": False,
+            "error": "SLOT_JUST_BOOKED",
+            "date": date,
+            "time": time
+        }
     except Exception as e:
         logger.error(f"❌ Create appointment error: {e}")
-        return {"success": False, "error": f"Errore nella prenotazione: {str(e)}"}
+        return {"success": False, "error": "BOOKING_ERROR", "details": str(e)}
 
 def check_availability(date: str, time: str) -> Dict[str, Any]:
     """Check if a time slot is available"""
@@ -471,7 +699,8 @@ def check_availability(date: str, time: str) -> Dict[str, Any]:
             return {
                 "success": True,
                 "available": available,
-                "message": f"{date} alle {time}: {'Disponibile ✅' if available else 'Già prenotato ❌'}"
+                "date": date,
+                "time": time
             }
         finally:
             conn.close()
@@ -492,6 +721,8 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
     try:
         # Normalize phone
         normalized_phone = normalize_phone(customer_phone)
+        # Format phone for display (last 4 digits)
+        phone_display = f"***{normalized_phone[-4:]}" if len(normalized_phone) >= 4 else normalized_phone
         now = datetime.now()
         today = now.date()
 
@@ -509,12 +740,15 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
             )
 
             appointments = []
-            for row in cur.fetchall():
+            for idx, row in enumerate(cur.fetchall(), 1):
                 service = SALON_SERVICES.get(row[2], {})
+                apt_id = row[0]
                 appointments.append({
-                    "appointment_id": row[0],
-                    "customer_name": row[1],
-                    "service": service.get("name_it", row[2]),
+                    "appointment_id": apt_id,  # ⚠️ USE THIS ID for modify_appointment and cancel_appointment
+                    "booked_name": row[1],  # Name given when booking
+                    "service_code": row[2],
+                    "service_en": service.get("name_en", row[2]),
+                    "service_it": service.get("name_it", row[2]),
                     "date": str(row[3]),
                     "time": format_time_12h(row[4]),
                     "price": float(row[5]) if row[5] else 0,
@@ -524,14 +758,17 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
             if not appointments:
                 return {
                     "success": True,
+                    "your_phone": phone_display,
                     "appointments": [],
-                    "message": "Non hai appuntamenti attivi."
+                    "count": 0
                 }
 
             return {
                 "success": True,
+                "your_phone": phone_display,
+                "note": "IMPORTANT: Use 'appointment_id' (not any other number) when calling modify_appointment or cancel_appointment",
                 "appointments": appointments,
-                "message": f"Hai {len(appointments)} appuntamento/i attivo/i."
+                "count": len(appointments)
             }
         finally:
             conn.close()
@@ -560,7 +797,8 @@ def cancel_appointment(customer_phone: str, appointment_id: int) -> Dict[str, An
             if not row:
                 return {
                     "success": False,
-                    "error": f"Appuntamento #{appointment_id} non trovato o già cancellato."
+                    "error": "APPOINTMENT_NOT_FOUND",
+                    "appointment_id": appointment_id
                 }
 
             google_event_id = row[1]
@@ -576,12 +814,13 @@ def cancel_appointment(customer_phone: str, appointment_id: int) -> Dict[str, An
             )
             conn.commit()
 
-            calendar_note = " (rimosso dal calendario)" if google_event_id else ""
+            calendar_note = " (removed from calendar)" if google_event_id else ""
             logger.info(f"✅ Appointment #{appointment_id} cancelled{calendar_note}")
 
             return {
                 "success": True,
-                "message": f"Appuntamento #{appointment_id} cancellato con successo."
+                "cancelled_appointment_id": appointment_id,
+                "calendar_updated": bool(google_event_id)
             }
         finally:
             conn.close()
@@ -620,7 +859,8 @@ def modify_appointment(
             if not appointment:
                 return {
                     "success": False,
-                    "error": f"Appuntamento #{appointment_id} non trovato. Usa get_customer_appointments per vedere gli appuntamenti attivi."
+                    "error": "APPOINTMENT_NOT_FOUND",
+                    "appointment_id": appointment_id
                 }
 
             # Current values
@@ -635,21 +875,39 @@ def modify_appointment(
             final_time = new_time if new_time else current_time
             final_service = new_service.lower() if new_service else current_service
 
-            # Validate new service if changed
-            service = SALON_SERVICES.get(final_service)
-            if not service:
-                return {
-                    "success": False,
-                    "error": f"Servizio non riconosciuto: {final_service}. Servizi: taglio, piega, colore, colpi_sole, trattamento"
-                }
+            # Validate new service ONLY if being changed
+            if new_service:
+                service = SALON_SERVICES.get(final_service)
+                if not service:
+                    return {
+                        "success": False,
+                        "error": "INVALID_SERVICE",
+                        "provided": final_service,
+                        "valid_services": list(SALON_SERVICES.keys())
+                    }
+            else:
+                # Keep existing service - get it for duration/price or use defaults
+                service = SALON_SERVICES.get(final_service, {"duration": 45, "price": 35, "name_it": final_service})
 
             # Validate new date and time together (check if in the past)
             try:
                 final_datetime = datetime.strptime(f"{final_date} {final_time}", "%Y-%m-%d %H:%M")
                 if final_datetime < datetime.now():
-                    return {"success": False, "error": "Non è possibile spostare l'appuntamento nel passato."}
+                    return {"success": False, "error": "PAST_DATE_NOT_ALLOWED"}
             except ValueError:
-                return {"success": False, "error": f"Formato data/ora non valido: {final_date} {final_time}"}
+                return {"success": False, "error": "INVALID_DATE_TIME_FORMAT", "provided_date": final_date, "provided_time": final_time}
+
+            # Validate business hours, closed days, and holidays
+            business_validation = validate_business_day_and_time(final_date, final_time)
+            if not business_validation["valid"]:
+                return {
+                    "success": False,
+                    "error": business_validation["error_code"],
+                    "message": business_validation["error"],
+                    "message_it": business_validation.get("error_it", ""),
+                    "date": final_date,
+                    "time": final_time
+                }
 
             # Check if new slot is available (only if date or time changed)
             if new_date or new_time:
@@ -662,7 +920,9 @@ def modify_appointment(
                 if cur.fetchone()[0] > 0:
                     return {
                         "success": False,
-                        "error": f"Il {final_date} alle {final_time} è già occupato. Scegli un altro orario."
+                        "error": "SLOT_ALREADY_BOOKED",
+                        "date": final_date,
+                        "time": final_time
                     }
 
             # Update the appointment
@@ -687,36 +947,49 @@ def modify_appointment(
                     customer_phone=normalized_phone
                 )
 
-            calendar_note = " (calendario aggiornato)" if google_event_id else ""
+            calendar_note = " (calendar updated)" if google_event_id else ""
             logger.info(f"✅ Appointment #{appointment_id} modified: {final_date} {final_time} {final_service}{calendar_note}")
 
-            # Build change summary
-            changes = []
+            # Build change details
+            changes = {}
             if new_date and new_date != current_date:
-                changes.append(f"data: {current_date} → {final_date}")
+                changes["date"] = {"from": current_date, "to": final_date}
             if new_time and new_time != current_time:
-                changes.append(f"ora: {current_time} → {final_time}")
+                changes["time"] = {"from": current_time, "to": final_time}
             if new_service and new_service.lower() != current_service.lower():
-                changes.append(f"servizio: {current_service} → {final_service}")
-
-            change_text = ", ".join(changes) if changes else "nessuna modifica"
+                changes["service"] = {"from": current_service, "to": final_service}
 
             return {
                 "success": True,
                 "appointment_id": appointment_id,
-                "message": f"Appuntamento #{appointment_id} modificato! {current_name}: {service['name_it']} il {final_date} alle {final_time}. Modifiche: {change_text}"
+                "customer_name": current_name,
+                "service": service['name_it'],
+                "service_en": service.get('name_en', final_service),
+                "new_date": final_date,
+                "new_time": final_time,
+                "changes": changes,
+                "calendar_updated": bool(google_event_id)
             }
         finally:
             conn.close()
 
+    except psycopg2.errors.UniqueViolation:
+        # Race condition: new slot was taken between check and update
+        logger.warning(f"⚠️ Race condition: slot taken during modify for appointment #{appointment_id}")
+        return {
+            "success": False,
+            "error": "SLOT_JUST_BOOKED"
+        }
     except Exception as e:
         logger.error(f"❌ Modify appointment error: {e}")
-        return {"success": False, "error": f"Errore nella modifica: {str(e)}"}
+        return {"success": False, "error": "MODIFICATION_ERROR", "details": str(e)}
 
 def get_available_slots(date: str) -> Dict[str, Any]:
     """
     Get available time slots for a specific date.
-    Returns 30-minute slots from 09:00 to 19:00 that are not booked.
+    Returns 30-minute slots during business hours that are not booked.
+    Business hours: Tue-Fri 9:00-18:00, Sat 9:00-17:00
+    Closed: Monday, Sunday, Dec 25, Jan 1
     """
     try:
         # Validate date
@@ -724,10 +997,27 @@ def get_available_slots(date: str) -> Dict[str, Any]:
             parsed_date = datetime.strptime(date, "%Y-%m-%d")
             now = datetime.now()
             if parsed_date.date() < now.date():
-                return {"success": False, "error": "Non posso mostrare disponibilità per date passate."}
+                return {"success": False, "error": "PAST_DATE_NOT_ALLOWED"}
             is_today = parsed_date.date() == now.date()
         except ValueError:
-            return {"success": False, "error": f"Formato data non valido: {date}. Usa YYYY-MM-DD"}
+            return {"success": False, "error": "INVALID_DATE_FORMAT", "provided_date": date}
+
+        # Check if it's a closed day (without time validation)
+        business_validation = validate_business_day_and_time(date, None)
+        if not business_validation["valid"]:
+            return {
+                "success": True,  # Success but no slots
+                "date": date,
+                "available_slots": [],
+                "count": 0,
+                "closed": True,
+                "reason": business_validation["error"],
+                "reason_it": business_validation.get("error_it", "")
+            }
+
+        # Determine closing hour based on day
+        weekday = parsed_date.weekday()
+        closing_hour = 17 if weekday == 5 else 18  # Saturday: 17:00, others: 18:00
 
         conn = get_db_connection()
         try:
@@ -747,9 +1037,9 @@ def get_available_slots(date: str) -> Dict[str, Any]:
         finally:
             conn.close()
 
-        # Generate all possible slots (09:00 to 19:00, every 30 minutes)
+        # Generate all possible slots based on business hours
         all_slots = []
-        for hour in range(9, 19):
+        for hour in range(9, closing_hour):
             all_slots.append(f"{hour:02d}:00")
             all_slots.append(f"{hour:02d}:30")
 
@@ -765,15 +1055,16 @@ def get_available_slots(date: str) -> Dict[str, Any]:
         if not available_slots:
             return {
                 "success": True,
+                "date": date,
                 "available_slots": [],
-                "message": f"Nessun orario disponibile per il {date}."
+                "count": 0
             }
 
         return {
             "success": True,
             "date": date,
             "available_slots": available_slots,
-            "message": f"Orari disponibili per il {date}: {', '.join(available_slots)}"
+            "count": len(available_slots)
         }
 
     except Exception as e:
@@ -781,119 +1072,171 @@ def get_available_slots(date: str) -> Dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 # ============================================================================
-# OPENAI FUNCTION DEFINITIONS
+# OPENAI TOOLS DEFINITIONS (New API - replaces deprecated 'functions')
+# Using strict mode for guaranteed schema compliance
 # ============================================================================
 
-BOOKING_FUNCTIONS = [
+BOOKING_TOOLS = [
     {
-        "name": "create_appointment",
-        "description": "Crea un appuntamento al salone. CHIAMARE SOLO dopo aver ricevuto conferma esplicita dal cliente (sì/ok/confermo). Raccogliere sempre: nome, servizio, data, ora.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "customer_name": {
-                    "type": "string",
-                    "description": "Nome completo del cliente"
+        "type": "function",
+        "function": {
+            "name": "create_appointment",
+            "description": "Create a salon appointment. Call this IMMEDIATELY when customer confirms booking (says yes/ok/confirm).",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_name": {
+                        "type": "string",
+                        "description": "Customer's full name"
+                    },
+                    "service_type": {
+                        "type": "string",
+                        "description": "Service type code",
+                        "enum": ["taglio_donna", "taglio_uomo", "piega", "colore_base", "balayage", "trattamento_ristrutturante", "trattamento_cute"]
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": f"Appointment date in YYYY-MM-DD format. Today is {TODAY}, tomorrow is {TOMORROW}"
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": "Appointment time in HH:MM 24h format (e.g., 15:00 for 3 PM)"
+                    }
                 },
-                "service_type": {
-                    "type": "string",
-                    "description": "Tipo di servizio: taglio, piega, colore, colpi_sole, trattamento",
-                    "enum": ["taglio", "piega", "colore", "colpi_sole", "trattamento"]
-                },
-                "date": {
-                    "type": "string",
-                    "description": f"Data appuntamento in formato YYYY-MM-DD. Oggi è {TODAY}, domani è {TOMORROW}"
-                },
-                "time": {
-                    "type": "string",
-                    "description": "Ora appuntamento in formato HH:MM (24 ore, es: 15:00 per le 3 del pomeriggio)"
-                }
-            },
-            "required": ["customer_name", "service_type", "date", "time"]
+                "required": ["customer_name", "service_type", "date", "time"],
+                "additionalProperties": False
+            }
         }
     },
     {
-        "name": "check_availability",
-        "description": "Verifica se una data e ora specifica è disponibile per la prenotazione",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "date": {
-                    "type": "string",
-                    "description": "Data in formato YYYY-MM-DD"
+        "type": "function",
+        "function": {
+            "name": "check_availability",
+            "description": "Check if a specific date and time slot is available for booking.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Date in YYYY-MM-DD format"
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": "Time in HH:MM 24h format"
+                    }
                 },
-                "time": {
-                    "type": "string",
-                    "description": "Ora in formato HH:MM (24 ore)"
-                }
-            },
-            "required": ["date", "time"]
+                "required": ["date", "time"],
+                "additionalProperties": False
+            }
         }
     },
     {
-        "name": "get_customer_appointments",
-        "description": "Ottieni tutti gli appuntamenti attivi del cliente. Usa quando il cliente chiede di vedere/controllare le sue prenotazioni.",
-        "parameters": {
-            "type": "object",
-            "properties": {}
+        "type": "function",
+        "function": {
+            "name": "get_customer_appointments",
+            "description": "Get customer's active appointments. MUST call this FIRST before modify or cancel. Returns 'id' field needed for modify/cancel operations.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False
+            }
         }
     },
     {
-        "name": "cancel_appointment",
-        "description": "Cancella un appuntamento specifico tramite ID. IMPORTANTE: Se il cliente non specifica l'ID, chiama PRIMA get_customer_appointments per vedere i suoi appuntamenti.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "appointment_id": {
-                    "type": "integer",
-                    "description": "L'ID dell'appuntamento da cancellare (es: 123 da 'Appuntamento #123')"
-                }
-            },
-            "required": ["appointment_id"]
+        "type": "function",
+        "function": {
+            "name": "cancel_appointment",
+            "description": "Cancel an appointment. Use the 'id' field from get_customer_appointments result.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "appointment_id": {
+                        "type": "integer",
+                        "description": "The 'id' field from get_customer_appointments result"
+                    }
+                },
+                "required": ["appointment_id"],
+                "additionalProperties": False
+            }
         }
     },
     {
-        "name": "modify_appointment",
-        "description": "Modifica un appuntamento esistente (data, ora, servizio). IMPORTANTE: Se il cliente non specifica l'ID, chiama PRIMA get_customer_appointments per vedere i suoi appuntamenti e ottenere l'ID.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "appointment_id": {
-                    "type": "integer",
-                    "description": "L'ID dell'appuntamento da modificare"
+        "type": "function",
+        "function": {
+            "name": "modify_appointment",
+            "description": "Modify/reschedule an appointment. Use the 'id' field from get_customer_appointments result.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "appointment_id": {
+                        "type": "integer",
+                        "description": "The 'id' field from get_customer_appointments result"
+                    },
+                    "new_date": {
+                        "type": ["string", "null"],
+                        "description": f"New date in YYYY-MM-DD format. Today is {TODAY}, tomorrow is {TOMORROW}. Use null if not changing date."
+                    },
+                    "new_time": {
+                        "type": ["string", "null"],
+                        "description": "New time in HH:MM 24h format. Use null if not changing time."
+                    },
+                    "new_service": {
+                        "type": ["string", "null"],
+                        "description": "New service code. Use null if not changing service.",
+                        "enum": ["taglio_donna", "taglio_uomo", "piega", "colore_base", "balayage", "trattamento_ristrutturante", "trattamento_cute", None]
+                    }
                 },
-                "new_date": {
-                    "type": "string",
-                    "description": f"Nuova data in formato YYYY-MM-DD (opzionale). Oggi è {TODAY}, domani è {TOMORROW}"
-                },
-                "new_time": {
-                    "type": "string",
-                    "description": "Nuovo orario in formato HH:MM (opzionale)"
-                },
-                "new_service": {
-                    "type": "string",
-                    "description": "Nuovo servizio (opzionale): taglio, piega, colore, colpi_sole, trattamento",
-                    "enum": ["taglio", "piega", "colore", "colpi_sole", "trattamento"]
-                }
-            },
-            "required": ["appointment_id"]
+                "required": ["appointment_id", "new_date", "new_time", "new_service"],
+                "additionalProperties": False
+            }
         }
     },
     {
-        "name": "get_available_slots",
-        "description": "Mostra tutti gli orari disponibili per una data specifica. Utile quando il cliente chiede 'che orari avete?' o 'quando siete liberi?'",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "date": {
-                    "type": "string",
-                    "description": f"Data in formato YYYY-MM-DD. Oggi è {TODAY}, domani è {TOMORROW}"
-                }
-            },
-            "required": ["date"]
+        "type": "function",
+        "function": {
+            "name": "get_available_slots",
+            "description": "Show all available time slots for a specific date.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": f"Date in YYYY-MM-DD format. Today is {TODAY}, tomorrow is {TOMORROW}"
+                    }
+                },
+                "required": ["date"],
+                "additionalProperties": False
+            }
         }
     }
 ]
+
+# Convert tools format to functions format for old SDK (v0.x)
+def convert_tools_to_functions(tools):
+    """Convert new 'tools' format to old 'functions' format for SDK v0.x"""
+    functions = []
+    for tool in tools:
+        if tool.get("type") == "function":
+            func = tool["function"].copy()
+            # Remove 'strict' field not supported in old SDK
+            func.pop("strict", None)
+            # Handle None in enum for old SDK
+            params = func.get("parameters", {})
+            if "properties" in params:
+                for prop_name, prop_val in params["properties"].items():
+                    if "enum" in prop_val and None in prop_val["enum"]:
+                        prop_val["enum"] = [e for e in prop_val["enum"] if e is not None]
+            functions.append(func)
+    return functions
+
+BOOKING_FUNCTIONS = convert_tools_to_functions(BOOKING_TOOLS) if OPENAI_SDK_VERSION < 1 else None
 
 # ============================================================================
 # FUNCTION EXECUTION
@@ -941,7 +1284,7 @@ def execute_function(function_name: str, arguments: str, phone: str) -> Dict[str
             return get_available_slots(date=args["date"])
 
         else:
-            return {"success": False, "error": f"Funzione sconosciuta: {function_name}"}
+            return {"success": False, "error": "UNKNOWN_FUNCTION", "function_name": function_name}
     
     except Exception as e:
         logger.error(f"Function execution error: {e}")
@@ -953,253 +1296,289 @@ def execute_function(function_name: str, arguments: str, phone: str) -> Dict[str
 
 conversation_history: Dict[str, List[Dict]] = {}
 
-# Action words that indicate AI claims it did/will do something
-ACTION_CLAIM_WORDS = [
-    # English - past tense (completed actions)
-    "successfully", "confirmed", "booked", "rescheduled", "cancelled", "canceled",
-    "modified", "changed", "updated", "done", "completed",
-    # English - base/present (promises or ongoing)
-    "reschedule", "cancel", "modify", "change", "update", "book",
-    "i will", "i'll", "let me", "i'm going to", "going to reschedule",
-    "make that change", "make the change",
-    # Italian - past
-    "confermato", "prenotato", "modificato", "cancellato", "spostato",
-    "cambiato", "aggiornato", "fatto", "completato",
-    # Italian - promises
-    "modifico", "cancello", "prenoto", "sposto", "cambio",
-    "sto per", "vado a", "procedo"
-]
-
-# Functions that actually perform actions
-ACTION_FUNCTIONS = ["create_appointment", "modify_appointment", "cancel_appointment"]
-
-def detect_false_success_claim(response_text: str, function_called: str = None) -> bool:
-    """
-    Detect if AI claims success but didn't actually call an action function.
-    Returns True if AI is lying (claimed action but didn't do it).
-    """
-    response_lower = response_text.lower()
-
-    # Check if response claims an action was taken
-    matched_words = [word for word in ACTION_CLAIM_WORDS if word in response_lower]
-    claims_action = len(matched_words) > 0
-
-    # Check if an action function was actually called
-    actually_acted = function_called in ACTION_FUNCTIONS if function_called else False
-
-    # Log for debugging
-    if claims_action:
-        logger.info(f"🔍 Validation: Response contains action words: {matched_words}")
-        logger.info(f"🔍 Validation: Function called: {function_called}, Is action function: {actually_acted}")
-
-    # If claims action but didn't act, it's a false claim
-    if claims_action and not actually_acted:
-        logger.warning(f"⚠️ FALSE CLAIM DETECTED: AI said '{matched_words}' but called '{function_called}'")
-        return True
-
-    return False
-
-RETRY_PROMPT = """⚠️ ERRORE CRITICO: Hai detto che l'azione è stata completata MA NON HAI CHIAMATO LA FUNZIONE!
-
-DEVI chiamare la funzione appropriata ORA:
-- Per prenotare: chiama create_appointment
-- Per modificare: chiama modify_appointment
-- Per cancellare: chiama cancel_appointment
-
-NON rispondere senza chiamare la funzione. Il cliente sta aspettando."""
-
 def get_ai_response(phone: str, message: str) -> str:
-    """Get AI response with function calling and validation"""
+    """
+    Get AI response with SDK version compatibility.
+
+    Supports both old SDK (v0.x) and new SDK (v1.0+) syntax.
+    Key features:
+    - Uses gpt-4o for reliable function calling
+    - Uses tools/functions API based on SDK version
+    - Temperature=0 for deterministic behavior
+    """
     try:
         # Get or create conversation history
         if phone not in conversation_history:
             conversation_history[phone] = []
-        
+
         # Build messages
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(conversation_history[phone][-10:])  # Last 10 messages
         messages.append({"role": "user", "content": message})
-        
-        # Call OpenAI with function calling
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            functions=BOOKING_FUNCTIONS,
-            function_call="auto",
-            temperature=0.7
-        )
-        
-        assistant_message = response['choices'][0]['message']
-        
-        # Handle function calls
-        if assistant_message.get('function_call'):
-            function_name = assistant_message['function_call']['name']
-            function_args = assistant_message['function_call']['arguments']
-            
-            logger.info(f"🔧 AI calling function: {function_name}")
-            logger.info(f"   Args: {function_args}")
-            
-            # Execute the function
-            function_result = execute_function(function_name, function_args, phone)
-            
-            logger.info(f"   Result: {function_result}")
-            
-            # Add function result to messages
-            messages.append(assistant_message)
-            messages.append({
-                "role": "function",
-                "name": function_name,
-                "content": json.dumps(function_result)
-            })
-            
-            # Get final response after function execution
-            second_response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
+
+        # Call OpenAI with version-appropriate syntax
+        if OPENAI_SDK_VERSION >= 1:
+            # New SDK v1.0+ syntax
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                tools=BOOKING_TOOLS,
+                tool_choice="auto",
+                temperature=0
+            )
+            assistant_message = response.choices[0].message
+            has_function_call = bool(assistant_message.tool_calls)
+        else:
+            # Old SDK v0.x syntax
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
                 messages=messages,
                 functions=BOOKING_FUNCTIONS,
                 function_call="auto",
-                temperature=0.7
+                temperature=0
             )
+            assistant_message = response["choices"][0]["message"]
+            has_function_call = "function_call" in assistant_message
 
-            second_message = second_response['choices'][0]['message']
+        # Handle function/tool calls
+        if has_function_call:
+            if OPENAI_SDK_VERSION >= 1:
+                # New SDK: handle tool_calls array
+                tool_calls = assistant_message.tool_calls
 
-            # Check if second response wants to call another function
-            if second_message.get('function_call'):
-                # AI wants to call another function - execute it
-                func2_name = second_message['function_call']['name']
-                func2_args = second_message['function_call']['arguments']
-
-                logger.info(f"🔧 AI calling second function: {func2_name}")
-                logger.info(f"   Args: {func2_args}")
-
-                func2_result = execute_function(func2_name, func2_args, phone)
-                logger.info(f"   Result: {func2_result}")
-
-                messages.append(second_message)
                 messages.append({
-                    "role": "function",
-                    "name": func2_name,
-                    "content": json.dumps(func2_result)
+                    "role": "assistant",
+                    "content": assistant_message.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        } for tc in tool_calls
+                    ]
                 })
 
-                # Get third response
-                third_response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=messages,
-                    temperature=0.7
-                )
-                final_message = third_response['choices'][0]['message']['content']
+                for tool_call in tool_calls:
+                    function_name = tool_call.function.name
+                    function_args = tool_call.function.arguments
+                    tool_call_id = tool_call.id
 
-                # Update which function was actually called for validation
-                function_name = func2_name
+                    logger.info(f"🔧 AI calling tool: {function_name}")
+                    logger.info(f"   Args: {function_args}")
+
+                    function_result = execute_function(function_name, function_args, phone)
+                    logger.info(f"   Result: {function_result}")
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": json.dumps(function_result)
+                    })
             else:
-                final_message = second_message.get('content', '')
+                # Old SDK: handle function_call object
+                function_call = assistant_message["function_call"]
+                function_name = function_call["name"]
+                function_args = function_call["arguments"]
 
-            # Validate: AI might claim success after calling get_customer_appointments (wrong function)
-            if detect_false_success_claim(final_message, function_called=function_name):
-                logger.warning(f"⚠️ AI hallucination after {function_name}! Claimed action success but called wrong function. Retrying...")
+                logger.info(f"🔧 AI calling function: {function_name}")
+                logger.info(f"   Args: {function_args}")
 
-                messages.append({"role": "assistant", "content": final_message})
-                messages.append({"role": "user", "content": RETRY_PROMPT})
+                messages.append(assistant_message)
 
-                retry_response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
+                function_result = execute_function(function_name, function_args, phone)
+                logger.info(f"   Result: {function_result}")
+
+                messages.append({
+                    "role": "function",
+                    "name": function_name,
+                    "content": json.dumps(function_result)
+                })
+
+            # Get second response after function execution
+            if OPENAI_SDK_VERSION >= 1:
+                second_response = openai_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    tools=BOOKING_TOOLS,
+                    tool_choice="auto",
+                    temperature=0
+                )
+                second_message = second_response.choices[0].message
+                has_second_call = bool(second_message.tool_calls)
+            else:
+                second_response = openai.ChatCompletion.create(
+                    model="gpt-4o",
                     messages=messages,
                     functions=BOOKING_FUNCTIONS,
                     function_call="auto",
-                    temperature=0.3
+                    temperature=0
                 )
+                second_message = second_response["choices"][0]["message"]
+                has_second_call = "function_call" in second_message
 
-                retry_message = retry_response['choices'][0]['message']
-
-                if retry_message.get('function_call'):
-                    retry_func = retry_message['function_call']['name']
-                    retry_args = retry_message['function_call']['arguments']
-
-                    logger.info(f"🔧 RETRY - AI calling function: {retry_func}")
-                    logger.info(f"   Args: {retry_args}")
-
-                    retry_result = execute_function(retry_func, retry_args, phone)
-                    logger.info(f"   Result: {retry_result}")
-
-                    messages.append(retry_message)
+            # Handle second round of function calls
+            if has_second_call:
+                if OPENAI_SDK_VERSION >= 1:
+                    tool_calls_2 = second_message.tool_calls
                     messages.append({
-                        "role": "function",
-                        "name": retry_func,
-                        "content": json.dumps(retry_result)
+                        "role": "assistant",
+                        "content": second_message.content,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                }
+                            } for tc in tool_calls_2
+                        ]
                     })
 
-                    final_resp = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=messages,
-                        temperature=0.7
-                    )
-                    final_message = final_resp['choices'][0]['message']['content']
-                    logger.info(f"✅ Retry successful after wrong function")
+                    for tool_call in tool_calls_2:
+                        func2_name = tool_call.function.name
+                        func2_args = tool_call.function.arguments
+                        tool_call_id_2 = tool_call.id
+
+                        logger.info(f"🔧 AI calling second tool: {func2_name}")
+                        func2_result = execute_function(func2_name, func2_args, phone)
+                        logger.info(f"   Result: {func2_result}")
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id_2,
+                            "content": json.dumps(func2_result)
+                        })
                 else:
-                    logger.error(f"❌ Retry failed after wrong function")
-                    final_message = "Mi dispiace, c'è stato un problema. Puoi ripetere cosa vuoi fare? (prenotare, modificare o cancellare)"
+                    function_call_2 = second_message["function_call"]
+                    func2_name = function_call_2["name"]
+                    func2_args = function_call_2["arguments"]
+
+                    logger.info(f"🔧 AI calling second function: {func2_name}")
+
+                    messages.append(second_message)
+
+                    func2_result = execute_function(func2_name, func2_args, phone)
+                    logger.info(f"   Result: {func2_result}")
+
+                    messages.append({
+                        "role": "function",
+                        "name": func2_name,
+                        "content": json.dumps(func2_result)
+                    })
+
+                # Get third response
+                if OPENAI_SDK_VERSION >= 1:
+                    third_response = openai_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=messages,
+                        tools=BOOKING_TOOLS,
+                        tool_choice="auto",
+                        temperature=0
+                    )
+                    third_message = third_response.choices[0].message
+                    has_third_call = bool(third_message.tool_calls)
+                else:
+                    third_response = openai.ChatCompletion.create(
+                        model="gpt-4o",
+                        messages=messages,
+                        functions=BOOKING_FUNCTIONS,
+                        function_call="auto",
+                        temperature=0
+                    )
+                    third_message = third_response["choices"][0]["message"]
+                    has_third_call = "function_call" in third_message
+
+                # Handle third round (rare)
+                if has_third_call:
+                    if OPENAI_SDK_VERSION >= 1:
+                        tool_calls_3 = third_message.tool_calls
+                        messages.append({
+                            "role": "assistant",
+                            "content": third_message.content,
+                            "tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments
+                                    }
+                                } for tc in tool_calls_3
+                            ]
+                        })
+
+                        for tool_call in tool_calls_3:
+                            func3_name = tool_call.function.name
+                            func3_args = tool_call.function.arguments
+                            tool_call_id_3 = tool_call.id
+
+                            logger.info(f"🔧 AI calling third tool: {func3_name}")
+                            func3_result = execute_function(func3_name, func3_args, phone)
+                            logger.info(f"   Result: {func3_result}")
+
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call_id_3,
+                                "content": json.dumps(func3_result)
+                            })
+
+                        fourth_response = openai_client.chat.completions.create(
+                            model="gpt-4o",
+                            messages=messages,
+                            temperature=0
+                        )
+                        final_message = fourth_response.choices[0].message.content or ''
+                    else:
+                        function_call_3 = third_message["function_call"]
+                        func3_name = function_call_3["name"]
+                        func3_args = function_call_3["arguments"]
+
+                        logger.info(f"🔧 AI calling third function: {func3_name}")
+
+                        messages.append(third_message)
+
+                        func3_result = execute_function(func3_name, func3_args, phone)
+                        logger.info(f"   Result: {func3_result}")
+
+                        messages.append({
+                            "role": "function",
+                            "name": func3_name,
+                            "content": json.dumps(func3_result)
+                        })
+
+                        fourth_response = openai.ChatCompletion.create(
+                            model="gpt-4o",
+                            messages=messages,
+                            temperature=0
+                        )
+                        final_message = fourth_response["choices"][0]["message"]["content"] or ''
+                else:
+                    if OPENAI_SDK_VERSION >= 1:
+                        final_message = third_message.content or ''
+                    else:
+                        final_message = third_message.get("content", '') or ''
+            else:
+                if OPENAI_SDK_VERSION >= 1:
+                    final_message = second_message.content or ''
+                else:
+                    final_message = second_message.get("content", '') or ''
 
             # Save to history
             conversation_history[phone].append({"role": "user", "content": message})
             conversation_history[phone].append({"role": "assistant", "content": final_message})
 
             return final_message
-        
+
         else:
-            # No function call - check if AI falsely claims success
-            response_text = assistant_message['content']
-
-            # Validate: did AI claim action without calling function?
-            if detect_false_success_claim(response_text, function_called=None):
-                logger.warning(f"⚠️ AI hallucination detected! Claimed success without function call. Retrying...")
-
-                # Retry with stronger prompt
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append({"role": "user", "content": RETRY_PROMPT})
-
-                retry_response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=messages,
-                    functions=BOOKING_FUNCTIONS,
-                    function_call="auto",
-                    temperature=0.3  # Lower temperature for more predictable behavior
-                )
-
-                retry_message = retry_response['choices'][0]['message']
-
-                # Check if retry called a function
-                if retry_message.get('function_call'):
-                    function_name = retry_message['function_call']['name']
-                    function_args = retry_message['function_call']['arguments']
-
-                    logger.info(f"🔧 RETRY - AI calling function: {function_name}")
-                    logger.info(f"   Args: {function_args}")
-
-                    # Execute the function
-                    function_result = execute_function(function_name, function_args, phone)
-                    logger.info(f"   Result: {function_result}")
-
-                    # Get final response
-                    messages.append(retry_message)
-                    messages.append({
-                        "role": "function",
-                        "name": function_name,
-                        "content": json.dumps(function_result)
-                    })
-
-                    final_response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=messages,
-                        temperature=0.7
-                    )
-
-                    response_text = final_response['choices'][0]['message']['content']
-                    logger.info(f"✅ Retry successful - function was called")
-                else:
-                    # Retry also failed to call function - give honest error
-                    logger.error(f"❌ Retry failed - AI still didn't call function")
-                    response_text = "Mi dispiace, c'è stato un problema. Puoi ripetere cosa vuoi fare? (prenotare, modificare o cancellare)"
+            # No function call - normal conversation
+            if OPENAI_SDK_VERSION >= 1:
+                response_text = assistant_message.content or ''
+            else:
+                response_text = assistant_message.get("content", '') or ''
 
             # Save to history
             conversation_history[phone].append({"role": "user", "content": message})
@@ -1209,7 +1588,9 @@ def get_ai_response(phone: str, message: str) -> str:
 
     except Exception as e:
         logger.error(f"❌ AI Error: {e}")
-        return "Mi dispiace, ho avuto un problema tecnico. Puoi riprovare?"
+        import traceback
+        logger.error(traceback.format_exc())
+        return "⚠️ Technical issue / Problema tecnico. Please try again / Riprova."
 
 # ============================================================================
 # WHATSAPP SERVICE
@@ -1272,9 +1653,9 @@ async def mark_as_read(message_id: str) -> bool:
 # ============================================================================
 
 app = FastAPI(
-    title="Salon Bella Vita - WhatsApp Bot with Booking",
-    description="Virtual receptionist with calendar integration",
-    version="3.0.0"
+    title="Aura Hair Studio - WhatsApp Bot with Booking",
+    description="Virtual receptionist (Simone) with calendar integration and reliable tool calling",
+    version="4.0.0"
 )
 
 app.add_middleware(
@@ -1361,8 +1742,9 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any]):
                 await send_whatsapp_message(phone, response)
         
         else:
-            await send_whatsapp_message(phone, 
-                "Grazie! Al momento posso rispondere solo a messaggi di testo. Come posso aiutarti con la prenotazione? 💇‍♀️")
+            await send_whatsapp_message(phone,
+                "I can only respond to text messages. How can I help you with your booking? 💇‍♀️\n\n"
+                "Posso rispondere solo a messaggi di testo. Come posso aiutarti con la prenotazione? 💇‍♀️")
     
     except Exception as e:
         logger.error(f"Process message error: {e}")
@@ -1374,11 +1756,13 @@ async def health_check():
         "status": "healthy",
         "service": BUSINESS_NAME,
         "type": BUSINESS_TYPE,
-        "version": "3.0.0",
+        "version": "4.0.0",
         "features": {
             "booking": True,
             "calendar_integration": True,
-            "function_calling": True
+            "tools_api": True,
+            "strict_mode": True,
+            "model": "gpt-4o"
         },
         "services": list(SALON_SERVICES.keys()),
         "timestamp": datetime.now().isoformat()
@@ -1389,8 +1773,9 @@ async def root():
     """Root endpoint"""
     return JSONResponse({
         "name": f"{BUSINESS_NAME} - WhatsApp Bot",
-        "version": "3.0.0",
-        "features": ["booking", "calendar", "AI"],
+        "version": "4.0.0",
+        "features": ["booking", "calendar", "AI", "tools_api", "strict_mode"],
+        "model": "gpt-4o",
         "services": [f"{s['name_it']} - €{s['price']}" for s in SALON_SERVICES.values()]
     })
 
