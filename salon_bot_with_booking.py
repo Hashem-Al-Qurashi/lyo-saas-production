@@ -1782,6 +1782,12 @@ def detect_language(text: str) -> str:
         'servizi', 'servizio', 'aperto', 'chiuso', 'orari', 'orario',
         'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato', 'domenica',
         'mattina', 'pomeriggio', 'sera',
+        # Pronouns and common verbs
+        'mi', 'ti', 'ci', 'vi', 'chiamo', 'chiamare', 'nome', 'scusa', 'scusi',
+        'perfetto', 'bene', 'benissimo', 'va', 'fatto', 'pronto', 'aspetto',
+        'conferma', 'confermo', 'annulla', 'modifica', 'sposta', 'cambia',
+        'ora', 'adesso', 'dopo', 'prima', 'subito', 'ancora', 'già',
+        'solo', 'anche', 'molto', 'poco', 'tanto', 'tutto', 'niente',
         'voglio', 'bisogno',
         'il', 'lo', 'gli', 'le', 'un', 'una', 'uno', 'della', 'del', 'dei',
         'sono', 'era', 'erano', 'essere', 'stato', 'avere', 'hai', 'aveva',
