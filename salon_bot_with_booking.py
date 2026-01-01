@@ -25,6 +25,15 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 
+# Email imports
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# Scheduler imports
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +95,13 @@ GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 ITALY_TZ = pytz.timezone("Europe/Rome")
 
+# Email Configuration for Reminders
+EMAIL_SENDER = "notifiche.lyo@gmail.com"
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "cswm qipr andczt vorgz")
+OWNER_EMAIL = "notifiche.lyo@gmail.com"
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+
 # Google Calendar Service (initialized lazily)
 _calendar_service = None
 
@@ -141,18 +157,69 @@ SALON_SERVICES = {
 TODAY = datetime.now().strftime("%Y-%m-%d")
 TOMORROW = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
+# Generate next 14 days calendar for the prompt
+def generate_date_calendar():
+    """Generate explicit date calendar for next 14 days"""
+    italian_days = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+    italian_months = ["", "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+                      "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+
+    calendar_lines = []
+    today = datetime.now()
+
+    for i in range(14):
+        day = today + timedelta(days=i)
+        day_name = italian_days[day.weekday()]
+        month_name = italian_months[day.month]
+        date_str = day.strftime("%Y-%m-%d")
+
+        # Determine status
+        if day.weekday() == 0:  # Monday
+            status = "CHIUSO (Lunedì)"
+        elif day.weekday() == 6:  # Sunday
+            status = "CHIUSO (Domenica)"
+        elif (day.month, day.day) == (12, 25):
+            status = "CHIUSO (Natale)"
+        elif (day.month, day.day) == (1, 1):
+            status = "CHIUSO (Capodanno)"
+        else:
+            status = "APERTO"
+
+        label = "(OGGI)" if i == 0 else "(DOMANI)" if i == 1 else ""
+        calendar_lines.append(f"   - {day_name} {day.day} {month_name} {day.year} ({date_str}) → {status} {label}".strip())
+
+    return "\n".join(calendar_lines)
+
+DATE_CALENDAR = generate_date_calendar()
+
 # System prompt with booking capabilities
 SYSTEM_PROMPT = f"""You are Simone, an employee at Aura Hair Studio in Milan, Italy.
 
 ══════════════════════════════════════════════════════════════
-🌐 LANGUAGE RULE #1 - THIS IS THE MOST IMPORTANT RULE:
+🌐 LANGUAGE RULE - MANDATORY - FOLLOW THE LANGUAGE INSTRUCTION:
 ══════════════════════════════════════════════════════════════
-   - DETECT the customer's language from their FIRST message
-   - English message (hi, hello, book, haircut, etc.) → REPLY IN ENGLISH ONLY
-   - Italian message (ciao, buongiorno, prenotare, taglio, etc.) → REPLY IN ITALIAN ONLY
-   - NEVER MIX LANGUAGES! NEVER SWITCH LANGUAGES!
-   - If customer says "Book haircut Monday" → Reply in ENGLISH: "Sorry, we're closed on Monday"
-   - If customer says "Prenota taglio lunedì" → Reply in ITALIAN: "Mi dispiace, siamo chiusi il lunedì"
+   ⚠️ CRITICAL: You will receive a [RESPOND IN ENGLISH] or [RISPONDI IN ITALIANO]
+   instruction before each customer message. ALWAYS follow that instruction!
+
+   This instruction is based on the customer's CURRENT message, so:
+   - If instruction says ENGLISH → respond ONLY in English
+   - If instruction says ITALIANO → respond ONLY in Italian
+
+   DO NOT let previous conversation history influence your language!
+   The CURRENT instruction always takes priority!
+
+   ❌ WRONG: Seeing Italian in history and responding Italian when instruction says ENGLISH
+   ❌ WRONG: Saying "La prenotazione è confermata!" when customer wrote in English
+   ✅ CORRECT: "Your booking is confirmed!" when instruction says ENGLISH
+   ✅ CORRECT: "La prenotazione è confermata!" when instruction says ITALIANO
+
+   EXAMPLES with instruction:
+   - [RESPOND IN ENGLISH] + "yes" → "Great! Your booking is confirmed for..."
+   - [RISPONDI IN ITALIANO] + "sì" → "Perfetto! La tua prenotazione è confermata per..."
+   - [RESPOND IN ENGLISH] + "3 pm" → "3 PM works! Would you like me to book that?"
+   - [RESPOND IN ENGLISH] + "1" → "1:00 PM it is! Booking confirmed."
+
+   ⚠️ NEVER switch languages mid-response! Use ONE language only!
 ══════════════════════════════════════════════════════════════
 
 🚫 IDENTITY RULE:
@@ -161,9 +228,12 @@ SYSTEM_PROMPT = f"""You are Simone, an employee at Aura Hair Studio in Milan, It
    - FORBIDDEN WORDS: artificial, virtual, chatbot, language model
    - Speak naturally as a real salon employee
 
-📅 CURRENT DATE INFO:
-   - TODAY: {datetime.now().strftime('%A %d %B %Y')} ({TODAY})
-   - TOMORROW: {(datetime.now() + timedelta(days=1)).strftime('%A %d %B %Y')} ({TOMORROW})
+📅 CALENDARIO PROSSIMI GIORNI (IMPORTANTE - USA QUESTE DATE!):
+{DATE_CALENDAR}
+
+   ⚠️ QUANDO IL CLIENTE DICE UN GIORNO (es. "martedì", "venerdì"):
+   → Guarda il calendario sopra e usa la DATA ESATTA (YYYY-MM-DD)
+   → NON inventare date! Usa SOLO le date nel calendario sopra!
 
 📍 SALON INFO:
 - Name: Aura Hair Studio
@@ -216,12 +286,28 @@ BOOKING FLOW:
    - Preferred date (convert "tomorrow" to {TOMORROW})
    - Preferred time (use 24h format: 15:00 for 3 PM)
 
-2. CONFIRM ONCE:
-   - After collecting everything, confirm: "Perfect! Summary: [Name], [Service] on [Date] at [Time]. Should I confirm the booking?"
-   - Wait for confirmation (yes/ok/confirm)
-   - THEN call create_appointment
+2. ASK FOR CONFIRMATION:
+   - After collecting everything, show summary: "Perfect! [Name], [Service] on [Date] at [Time]. Should I confirm?"
+   - Wait for customer to say yes/ok/confirm/sì
 
-3. USE FUNCTIONS:
+3. ⚠️ BOOKING CONFIRMATION RULE - CRITICAL:
+   When customer says "yes" or "confirm" or "ok" or "sì":
+
+   → STEP 1: Call create_appointment(customer_name, service_type, date, time)
+   → STEP 2: Wait for the tool to return
+   → STEP 3: Check if success=True
+   → STEP 4: ONLY THEN say "Booking confirmed!"
+
+   ❌ WRONG: Say "Prenotazione confermata!" without calling create_appointment
+   ❌ WRONG: Say "Done!" without calling create_appointment
+   ❌ WRONG: Ask "Should I confirm?" and then say "confirmed" without calling tool
+
+   ✅ CORRECT: Call create_appointment → get success=True → say "Confermato!"
+
+   If you say "confirmed" but didn't call create_appointment, the booking was NOT saved!
+   The customer will show up and have NO appointment!
+
+4. USE FUNCTIONS:
    - create_appointment: Book the appointment (only after confirmation!)
    - check_availability: Check if a specific time slot is available
    - get_available_slots: Show ALL available times for a date
@@ -287,10 +373,18 @@ BOOKING FLOW:
    6. get_available_slots(date)
       → Call when: Customer asks what times are available
 
+   7. confirm_reminder()
+      → Call when: Customer confirms they will come to their TOMORROW appointment
+      → This is for reminder confirmations, NOT new bookings
+      → Examples: "ci sarò", "confermo", "vengo", "ok ci vediamo domani", "yes I'll be there"
+      → If success=True, thank them warmly
+      → If success=False (no appointment tomorrow), just respond normally
+
    ⚡ ACTION = TOOL CALL
    If customer says "reschedule to 3pm" → CALL modify_appointment
    If customer says "cancel my appointment" → CALL cancel_appointment
    If customer says "yes, book it" → CALL create_appointment
+   If customer confirms tomorrow's reminder → CALL confirm_reminder
    TALKING about doing something is NOT the same as DOING it!
 
 Respond naturally and warmly like a real salon employee named Simone."""
@@ -427,6 +521,271 @@ def delete_calendar_event(event_id: str) -> bool:
         return False
 
 # ============================================================================
+# REMINDER SYSTEM
+# ============================================================================
+
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    """Send email using Gmail SMTP"""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+
+        logger.info(f"✅ Email sent to {to_email}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Email send failed: {e}")
+        return False
+
+
+def get_tomorrow_appointments() -> List[Dict]:
+    """Get all confirmed appointments for tomorrow"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        cur.execute("""
+            SELECT id, customer_phone, customer_name, service_type,
+                   appointment_date, appointment_time, price
+            FROM salon_appointments
+            WHERE appointment_date = %s
+              AND status = 'confirmed'
+              AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
+            ORDER BY appointment_time
+        """, (tomorrow,))
+
+        appointments = []
+        for row in cur.fetchall():
+            appointments.append({
+                "id": row[0],
+                "phone": row[1],
+                "name": row[2],
+                "service": row[3],
+                "date": row[4],
+                "time": row[5],
+                "price": row[6]
+            })
+
+        cur.close()
+        conn.close()
+        return appointments
+    except Exception as e:
+        logger.error(f"❌ Error getting tomorrow appointments: {e}")
+        return []
+
+
+def get_unconfirmed_appointments() -> List[Dict]:
+    """Get appointments where reminder was sent but not confirmed"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        cur.execute("""
+            SELECT id, customer_phone, customer_name, service_type,
+                   appointment_date, appointment_time, price
+            FROM salon_appointments
+            WHERE appointment_date = %s
+              AND status = 'confirmed'
+              AND reminder_sent_at IS NOT NULL
+              AND reminder_confirmed = FALSE
+            ORDER BY appointment_time
+        """, (tomorrow,))
+
+        appointments = []
+        for row in cur.fetchall():
+            appointments.append({
+                "id": row[0],
+                "phone": row[1],
+                "name": row[2],
+                "service": row[3],
+                "date": row[4],
+                "time": row[5],
+                "price": row[6]
+            })
+
+        cur.close()
+        conn.close()
+        return appointments
+    except Exception as e:
+        logger.error(f"❌ Error getting unconfirmed appointments: {e}")
+        return []
+
+
+def mark_reminder_sent(appointment_id: int) -> bool:
+    """Mark that reminder was sent for an appointment"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE salon_appointments
+            SET reminder_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (appointment_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error marking reminder sent: {e}")
+        return False
+
+
+def mark_reminder_confirmed(phone: str) -> Dict:
+    """Mark appointment as confirmed by customer"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+        normalized_phone = normalize_phone(phone)
+
+        # Find appointment for tomorrow from this phone
+        cur.execute("""
+            UPDATE salon_appointments
+            SET reminder_confirmed = TRUE,
+                reminder_confirmed_at = CURRENT_TIMESTAMP
+            WHERE customer_phone = %s
+              AND appointment_date = %s
+              AND status = 'confirmed'
+              AND reminder_sent_at IS NOT NULL
+            RETURNING id, customer_name, service_type, appointment_time
+        """, (normalized_phone, tomorrow))
+
+        result = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if result:
+            # Convert time to string for JSON serialization
+            time_obj = result[3]
+            time_str = time_obj.strftime("%H:%M") if hasattr(time_obj, 'strftime') else str(time_obj)[:5]
+            return {
+                "success": True,
+                "appointment_id": result[0],
+                "name": result[1],
+                "service": result[2],
+                "time": time_str
+            }
+        return {"success": False, "reason": "No pending reminder found"}
+    except Exception as e:
+        logger.error(f"❌ Error confirming reminder: {e}")
+        return {"success": False, "reason": str(e)}
+
+
+async def send_reminder_messages():
+    """Send reminder messages to all customers with tomorrow's appointments (runs at 10 AM)"""
+    logger.info("🔔 Starting daily reminder job...")
+
+    appointments = get_tomorrow_appointments()
+    logger.info(f"📋 Found {len(appointments)} appointments for tomorrow")
+
+    for apt in appointments:
+        # Format time for message
+        time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
+
+        # Client-provided reminder message
+        reminder_message = f"""Buongiorno!😊
+Ti ricordiamo che domani alle ore {time_str} hai un appuntamento con noi.
+Ti chiediamo gentilmente di confermare rispondendo a questo messaggio entro le 18:00 di oggi.
+
+In caso di mancata conferma, non possiamo garantire la disponibilità dell'appuntamento.
+
+Grazie!"""
+
+        # Send WhatsApp message
+        phone = apt["phone"]
+        if not phone.startswith("+"):
+            phone = "+" + phone
+
+        success = await send_whatsapp_message(phone, reminder_message)
+
+        if success:
+            mark_reminder_sent(apt["id"])
+            logger.info(f"✅ Reminder sent to {apt['name']} ({phone}) for {time_str}")
+        else:
+            logger.error(f"❌ Failed to send reminder to {apt['name']} ({phone})")
+
+    logger.info(f"🔔 Reminder job completed. Sent {len(appointments)} reminders.")
+
+
+async def check_unconfirmed_and_notify():
+    """Check for unconfirmed appointments and email owner (runs at 6 PM)"""
+    logger.info("📧 Starting unconfirmed appointments check...")
+
+    unconfirmed = get_unconfirmed_appointments()
+    logger.info(f"📋 Found {len(unconfirmed)} unconfirmed appointments")
+
+    if not unconfirmed:
+        logger.info("✅ All appointments confirmed! No email needed.")
+        return
+
+    # Build email body
+    tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%d/%m/%Y")
+
+    email_body = f"""Ciao,
+
+I seguenti appuntamenti per domani ({tomorrow}) NON sono stati confermati:
+
+"""
+    for apt in unconfirmed:
+        time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
+        email_body += f"• {apt['name']} - {apt['service']} alle {time_str} (Tel: {apt['phone']})\n"
+
+    email_body += """
+Puoi decidere se mantenerli o cancellarli.
+
+Saluti,
+Sistema Aura Hair Studio"""
+
+    # Send email
+    subject = f"⚠️ Appuntamenti non confermati per domani ({tomorrow})"
+    success = send_email(OWNER_EMAIL, subject, email_body)
+
+    if success:
+        logger.info(f"✅ Unconfirmed appointments email sent to {OWNER_EMAIL}")
+    else:
+        logger.error(f"❌ Failed to send unconfirmed appointments email")
+
+
+# Scheduler instance
+scheduler = AsyncIOScheduler(timezone=ITALY_TZ)
+
+
+def setup_reminder_scheduler():
+    """Set up the scheduled reminder jobs"""
+    # 10:00 AM - Send reminders
+    scheduler.add_job(
+        send_reminder_messages,
+        CronTrigger(hour=10, minute=0, timezone=ITALY_TZ),
+        id="send_reminders",
+        replace_existing=True
+    )
+
+    # 6:00 PM - Check unconfirmed and email owner
+    scheduler.add_job(
+        check_unconfirmed_and_notify,
+        CronTrigger(hour=18, minute=0, timezone=ITALY_TZ),
+        id="check_unconfirmed",
+        replace_existing=True
+    )
+
+    scheduler.start()
+    logger.info("✅ Reminder scheduler started (10 AM reminders, 6 PM check)")
+
+
+# ============================================================================
 # DATABASE FUNCTIONS
 # ============================================================================
 
@@ -453,9 +812,20 @@ def initialize_database():
                 price DECIMAL(10,2),
                 status VARCHAR(20) DEFAULT 'confirmed',
                 google_event_id VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reminder_sent_at TIMESTAMP,
+                reminder_confirmed BOOLEAN DEFAULT FALSE,
+                reminder_confirmed_at TIMESTAMP
             )
         """)
+
+        # Add reminder columns if they don't exist (for existing tables)
+        try:
+            cur.execute("ALTER TABLE salon_appointments ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP")
+            cur.execute("ALTER TABLE salon_appointments ADD COLUMN IF NOT EXISTS reminder_confirmed BOOLEAN DEFAULT FALSE")
+            cur.execute("ALTER TABLE salon_appointments ADD COLUMN IF NOT EXISTS reminder_confirmed_at TIMESTAMP")
+        except:
+            pass  # Columns already exist
         
         # Create conversation history table
         cur.execute("""
@@ -476,6 +846,25 @@ def initialize_database():
     except Exception as e:
         logger.error(f"❌ Database init error: {e}")
         return False
+
+def save_conversation_to_db(phone: str, name: str, message: str, response: str):
+    """
+    Save conversation to database for analytics and debugging.
+    Wrapped in try/except so logging failure never breaks the bot.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO salon_conversations (phone, name, message, response, timestamp)
+            VALUES (%s, %s, %s, %s, NOW())
+        """, (phone, name, message, response))
+        conn.commit()
+        conn.close()
+        logger.info(f"💾 Conversation logged for {phone}")
+    except Exception as e:
+        # Never fail the bot because of logging issues
+        logger.warning(f"⚠️ Failed to log conversation: {e}")
 
 # ============================================================================
 # BUSINESS HOURS VALIDATION
@@ -624,11 +1013,27 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             count = cur.fetchone()[0]
 
             if count > 0:
+                # Get available alternatives for the same date
+                cur.execute(
+                    """SELECT appointment_time FROM salon_appointments
+                       WHERE appointment_date = %s AND status = 'confirmed'
+                       ORDER BY appointment_time""",
+                    (date,)
+                )
+                booked_times = [str(row[0])[:5] for row in cur.fetchall()]
+
+                # Suggest alternatives
+                all_slots = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00"]
+                available_alternatives = [t for t in all_slots if t not in booked_times][:4]
+
                 return {
                     "success": False,
                     "error": "SLOT_ALREADY_BOOKED",
                     "date": date,
-                    "time": time
+                    "time": time,
+                    "available_alternatives": available_alternatives,
+                    "message_en": f"Sorry, {time} on {date} is already booked. Available times: {', '.join(available_alternatives)}",
+                    "message_it": f"Mi dispiace, {time} del {date} è già prenotato. Orari disponibili: {', '.join(available_alternatives)}"
                 }
 
             # Create Google Calendar event first
@@ -1215,6 +1620,20 @@ BOOKING_TOOLS = [
                 "additionalProperties": False
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "confirm_reminder",
+            "description": "Confirm a reminder for tomorrow's appointment. Call this when customer confirms they will come to their appointment tomorrow (e.g., 'ci sarò', 'confermo', 'vengo', 'ok ci vediamo', 'yes I'll be there').",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False
+            }
+        }
     }
 ]
 
@@ -1283,6 +1702,9 @@ def execute_function(function_name: str, arguments: str, phone: str) -> Dict[str
         elif function_name == "get_available_slots":
             return get_available_slots(date=args["date"])
 
+        elif function_name == "confirm_reminder":
+            return mark_reminder_confirmed(phone)
+
         else:
             return {"success": False, "error": "UNKNOWN_FUNCTION", "function_name": function_name}
     
@@ -1295,6 +1717,68 @@ def execute_function(function_name: str, arguments: str, phone: str) -> Dict[str
 # ============================================================================
 
 conversation_history: Dict[str, List[Dict]] = {}
+
+def detect_language(text: str) -> str:
+    """
+    Detect language of a message. Returns 'en' for English, 'it' for Italian.
+    Uses keyword-based detection for reliability with word boundary matching.
+    """
+    import re
+    text_lower = text.lower().strip()
+
+    # Tokenize into words (preserving word boundaries)
+    words = set(re.findall(r'\b\w+\b', text_lower))
+
+    # Strong English indicators (common English words)
+    english_words = {
+        'hi', 'hello', 'hey', 'morning', 'afternoon', 'evening',
+        'thanks', 'thank', 'please', 'yes', 'okay',
+        'book', 'booking', 'appointment', 'haircut', 'cancel', 'reschedule',
+        'what', 'when', 'where', 'how', 'why', 'who', 'which',
+        'are', 'you', 'do', 'can', 'could', 'would', 'will', 'should',
+        'available', 'tomorrow', 'today', 'time', 'price', 'cost', 'much',
+        'services', 'service', 'open', 'close', 'hours', 'hour',
+        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+        'want', 'need', 'like',
+        'the', 'is', 'was', 'were', 'be', 'been', 'have', 'has', 'had',
+        'this', 'that', 'these', 'those', 'my', 'your', 'our', 'their',
+        'for', 'at', 'any', 'slots', 'cut', 'hair', 'there',
+        'pm', 'am', 'and', 'or', 'but', 'with', 'from', 'to',
+    }
+
+    # Strong Italian indicators (common Italian words)
+    italian_words = {
+        'ciao', 'salve', 'buongiorno', 'buonasera', 'buonanotte',
+        'grazie', 'prego', 'favore', 'per', 'sì', 'si',
+        'prenotare', 'prenotazione', 'appuntamento', 'taglio', 'cancellare',
+        'cosa', 'quando', 'dove', 'come', 'perché', 'chi', 'quale',
+        'sei', 'siete', 'posso', 'puoi', 'potrebbe', 'vorrei',
+        'disponibile', 'domani', 'oggi', 'prezzo', 'costo', 'quanto',
+        'servizi', 'servizio', 'aperto', 'chiuso', 'orari', 'orario',
+        'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato', 'domenica',
+        'mattina', 'pomeriggio', 'sera',
+        'voglio', 'bisogno',
+        'il', 'lo', 'gli', 'le', 'un', 'una', 'uno', 'della', 'del', 'dei',
+        'sono', 'era', 'erano', 'essere', 'stato', 'avere', 'hai', 'aveva',
+        'questo', 'questa', 'questi', 'queste', 'quello', 'quella',
+        'mio', 'mia', 'tuo', 'tua', 'nostro', 'nostra', 'loro',
+        'con', 'alle', 'dalle', 'alle',
+    }
+
+    # Note: 'la', 'no', 'ok', 'si', 'a', 'e', 'i', 'o' are too ambiguous - excluded
+    # 'no' and 'ok' appear in both languages
+
+    # Count matches using word boundaries
+    english_count = len(words & english_words)
+    italian_count = len(words & italian_words)
+
+    # Log for debugging
+    logger.debug(f"Language detection: '{text[:50]}' → EN:{english_count} IT:{italian_count}")
+
+    # Default to English if unclear (most international users expect English)
+    if italian_count > english_count:
+        return 'it'
+    return 'en'
 
 def get_ai_response(phone: str, message: str) -> str:
     """
@@ -1311,9 +1795,20 @@ def get_ai_response(phone: str, message: str) -> str:
         if phone not in conversation_history:
             conversation_history[phone] = []
 
-        # Build messages
+        # Detect language of current message
+        detected_lang = detect_language(message)
+        lang_instruction = (
+            "[RESPOND IN ENGLISH - The customer is writing in English]"
+            if detected_lang == 'en'
+            else "[RISPONDI IN ITALIANO - Il cliente sta scrivendo in italiano]"
+        )
+        logger.info(f"🌐 Language detected: {detected_lang.upper()} for message: '{message[:50]}...'")
+
+        # Build messages with explicit language instruction
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(conversation_history[phone][-10:])  # Last 10 messages
+        # Add language instruction as a system message before user's message
+        messages.append({"role": "system", "content": lang_instruction})
         messages.append({"role": "user", "content": message})
 
         # Call OpenAI with version-appropriate syntax
@@ -1586,11 +2081,27 @@ def get_ai_response(phone: str, message: str) -> str:
 
             return response_text
 
+    except openai.RateLimitError as e:
+        logger.error(f"❌ Rate limit error: {e}")
+        return ("We're experiencing high demand. Please try again in a moment. "
+                "/ Alto traffico, riprova tra qualche secondo. "
+                "Or call us at +39 02 8394 5621 / Oppure chiamaci.")
+    except openai.APITimeoutError as e:
+        logger.error(f"❌ API timeout: {e}")
+        return ("Connection slow, please try again. "
+                "/ Connessione lenta, riprova. "
+                "Or call us at +39 02 8394 5621 / Oppure chiamaci.")
+    except openai.APIConnectionError as e:
+        logger.error(f"❌ API connection error: {e}")
+        return ("Connection issue, please try again. "
+                "/ Problema di connessione, riprova. "
+                "Or call us at +39 02 8394 5621 / Oppure chiamaci.")
     except Exception as e:
         logger.error(f"❌ AI Error: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        return "⚠️ Technical issue / Problema tecnico. Please try again / Riprova."
+        return ("Something went wrong. Please try again or call us at +39 02 8394 5621. "
+                "/ Qualcosa è andato storto. Riprova o chiamaci al +39 02 8394 5621.")
 
 # ============================================================================
 # WHATSAPP SERVICE
@@ -1670,6 +2181,7 @@ app.add_middleware(
 async def startup():
     """Initialize on startup"""
     initialize_database()
+    setup_reminder_scheduler()
     logger.info(f"🚀 {BUSINESS_NAME} WhatsApp Bot with Booking started!")
 
 @app.get("/webhook")
@@ -1727,18 +2239,28 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any]):
             text = message.get("text", {}).get("body", "")
             if text:
                 logger.info(f"📝 Message: {text[:100]}...")
-                
-                # Get AI response with function calling
+
+                # All messages go through AI - AI will call confirm_reminder if needed
                 response = get_ai_response(phone, text)
-                
+
+                # Log conversation to database for analytics
+                save_conversation_to_db(phone, contact_name, text, response)
+
+                # Log response preview
+                logger.info(f"📤 Response: {response[:100]}...")
+
                 await send_whatsapp_message(phone, response)
-        
+
         elif message_type == "interactive":
             interactive = message.get("interactive", {})
             text = interactive.get("button_reply", {}).get("title", "") or \
                    interactive.get("list_reply", {}).get("title", "")
             if text:
                 response = get_ai_response(phone, text)
+
+                # Log conversation to database for analytics
+                save_conversation_to_db(phone, contact_name, text, response)
+
                 await send_whatsapp_message(phone, response)
         
         else:
@@ -1756,14 +2278,16 @@ async def health_check():
         "status": "healthy",
         "service": BUSINESS_NAME,
         "type": BUSINESS_TYPE,
-        "version": "4.0.0",
+        "version": "4.1.0",
         "features": {
             "booking": True,
             "calendar_integration": True,
             "tools_api": True,
             "strict_mode": True,
+            "reminders": True,
             "model": "gpt-4o"
         },
+        "scheduler_running": scheduler.running if scheduler else False,
         "services": list(SALON_SERVICES.keys()),
         "timestamp": datetime.now().isoformat()
     })
@@ -1774,9 +2298,60 @@ async def root():
     return JSONResponse({
         "name": f"{BUSINESS_NAME} - WhatsApp Bot",
         "version": "4.0.0",
-        "features": ["booking", "calendar", "AI", "tools_api", "strict_mode"],
+        "features": ["booking", "calendar", "AI", "tools_api", "strict_mode", "reminders"],
         "model": "gpt-4o",
         "services": [f"{s['name_it']} - €{s['price']}" for s in SALON_SERVICES.values()]
+    })
+
+# ============================================================================
+# REMINDER TEST ENDPOINTS
+# ============================================================================
+
+@app.post("/reminders/send-now")
+async def trigger_reminders():
+    """Manually trigger sending reminders (for testing)"""
+    await send_reminder_messages()
+    return JSONResponse({
+        "status": "completed",
+        "message": "Reminder job executed"
+    })
+
+@app.post("/reminders/check-unconfirmed")
+async def trigger_unconfirmed_check():
+    """Manually trigger unconfirmed check (for testing)"""
+    await check_unconfirmed_and_notify()
+    return JSONResponse({
+        "status": "completed",
+        "message": "Unconfirmed check executed"
+    })
+
+@app.get("/reminders/status")
+async def reminder_status():
+    """Get reminder system status"""
+    tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow_apts = get_tomorrow_appointments()
+    unconfirmed = get_unconfirmed_appointments()
+
+    return JSONResponse({
+        "scheduler_running": scheduler.running,
+        "tomorrow_date": tomorrow,
+        "appointments_needing_reminder": len(tomorrow_apts),
+        "unconfirmed_count": len(unconfirmed),
+        "next_reminder_job": str(scheduler.get_job("send_reminders").next_run_time) if scheduler.get_job("send_reminders") else None,
+        "next_check_job": str(scheduler.get_job("check_unconfirmed").next_run_time) if scheduler.get_job("check_unconfirmed") else None
+    })
+
+@app.post("/reminders/test-email")
+async def test_email():
+    """Test email sending"""
+    success = send_email(
+        OWNER_EMAIL,
+        "Test Email - Aura Hair Studio",
+        "Questo è un test del sistema di notifiche email.\n\nSe ricevi questa email, il sistema funziona correttamente!"
+    )
+    return JSONResponse({
+        "success": success,
+        "sent_to": OWNER_EMAIL
     })
 
 # ============================================================================
