@@ -1,0 +1,40 @@
+# Secrets - NEVER commit
+.env
+*.json
+!package.json
+!package-lock.json
+client_secret_*
+service_account_key*
+token.json
+credentials.json
+
+# Large binary files
+*.zip
+*.tar.gz
+*.xlsx
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+
+# IDE
+.claude/
+.playwright-mcp/
+
+# Extracted archives
+extracted_*/
+
+# Old versions / backups
+*_fixed_*.py
+
+# Customer data
+customer_memories/
+test_memories/
+
+# Hex dumps
+2baa909e840b06495b3108fbefa0c649
