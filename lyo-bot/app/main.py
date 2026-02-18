@@ -3,6 +3,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.models.schemas import WebhookPayload
+from app.services.pipeline import pipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,9 +64,8 @@ async def chatwoot_webhook(request: Request):
 
 
 async def _process_message(payload: WebhookPayload):
-    """Background task: resolve tenant, process AI, send reply.
-    Wired up in Task 12 (pipeline.py)."""
+    """Background task: resolve tenant, process AI, send reply."""
     try:
-        logger.info(f"Processing message for account {payload.account.id}: {payload.content[:50]}")
+        await pipeline.process(payload)
     except Exception as e:
         logger.error(f"Error processing message: {e}")
