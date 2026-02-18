@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Lyo Management{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Dashboard</h1>
+
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+    <a href="/manage/treatments/" class="bg-white p-6 rounded-lg shadow hover:shadow-md transition">
+        <h2 class="text-lg font-semibold text-indigo-600 mb-2">Trattamenti</h2>
+        <p class="text-gray-500 text-sm">Gestisci i servizi offerti</p>
+    </a>
+
+    <a href="/manage/operators/" class="bg-white p-6 rounded-lg shadow hover:shadow-md transition">
+        <h2 class="text-lg font-semibold text-indigo-600 mb-2">Operatori</h2>
+        <p class="text-gray-500 text-sm">Gestisci il team</p>
+    </a>
+
+    <a href="/manage/hours/" class="bg-white p-6 rounded-lg shadow hover:shadow-md transition">
+        <h2 class="text-lg font-semibold text-indigo-600 mb-2">Orari</h2>
+        <p class="text-gray-500 text-sm">Configura orari e chiusure</p>
+    </a>
+
+    <a href="/manage/settings/" class="bg-white p-6 rounded-lg shadow hover:shadow-md transition">
+        <h2 class="text-lg font-semibold text-indigo-600 mb-2">Impostazioni</h2>
+        <p class="text-gray-500 text-sm">Impostazioni del bot e attivita</p>
+    </a>
+</div>
+{% endblock %}

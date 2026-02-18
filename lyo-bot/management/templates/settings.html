@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Impostazioni - Lyo Management{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Impostazioni</h1>
+
+{% if business %}
+<div class="bg-white p-6 rounded-lg shadow">
+    <form method="post" action="/manage/settings/save" class="space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Nome Bot</label>
+                <input type="text" name="bot_name" value="{{ business.bot_name or 'Assistente' }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Fuso Orario</label>
+                <input type="text" name="timezone" value="{{ business.timezone or 'Europe/Rome' }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Lingua</label>
+                <select name="language" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                    <option value="it" {% if business.language == 'it' %}selected{% endif %}>Italiano</option>
+                    <option value="en" {% if business.language == 'en' %}selected{% endif %}>English</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Email Proprietario</label>
+                <input type="email" name="owner_email" value="{{ business.owner_email or '' }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Indirizzo</label>
+                <input type="text" name="address" value="{{ business.address or '' }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Telefono</label>
+                <input type="text" name="phone" value="{{ business.phone or '' }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Email Attivita</label>
+                <input type="email" name="email" value="{{ business.email or '' }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            </div>
+        </div>
+        <div class="pt-4">
+            <button type="submit" class="bg-indigo-600 text-white py-2 px-6 rounded-md hover:bg-indigo-700">
+                Salva Impostazioni
+            </button>
+        </div>
+    </form>
+</div>
+{% else %}
+<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded">
+    Business non trovato.
+</div>
+{% endif %}
+{% endblock %}

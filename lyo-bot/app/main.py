@@ -2,8 +2,11 @@ import asyncio
 import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from app.models.schemas import WebhookPayload
 from app.services.pipeline import pipeline
+from app.services.reminders import reminder_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,6 +23,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def startup():
+    scheduler = AsyncIOScheduler(timezone="Europe/Rome")
+    scheduler.add_job(reminder_service.send_daily_reminders, CronTrigger(hour=10, minute=0))
+    scheduler.add_job(reminder_service.check_unconfirmed, CronTrigger(hour=18, minute=0))
+    scheduler.start()
+    logger.info("Scheduler started")
 
 
 @app.get("/health")
