@@ -1,0 +1,258 @@
+import logging
+from datetime import date, time
+from typing import Optional
+
+from app.models.database import get_connection
+from app.models.schemas import Business
+from app.services.availability import availability_service
+from app.services.customer import customer_service
+from app.services import calendar as cal_module
+
+logger = logging.getLogger(__name__)
+
+
+class BookingService:
+    """Create, cancel, modify, and query appointments."""
+
+    # ------------------------------------------------------------------
+    # Create
+    # ------------------------------------------------------------------
+
+    def create_appointment(
+        self,
+        business: Business,
+        customer_phone: str,
+        customer_name: str,
+        treatment_code: str,
+        appt_date: date,
+        appt_time: time,
+        preferred_operator: Optional[str] = None,
+        platform: Optional[str] = None,
+        chatwoot_conversation_id: Optional[int] = None,
+    ) -> dict:
+        # Validate name
+        if not customer_name or not customer_name.strip():
+            return {"success": False, "error": "CUSTOMER_NAME_REQUIRED"}
+
+        # Check slot
+        slot = availability_service.check_slot(
+            business, treatment_code, appt_date, appt_time, preferred_operator
+        )
+        if not slot.get("available"):
+            return {
+                "success": False,
+                "error": slot.get("reason", "SLOT_UNAVAILABLE"),
+                "alternatives": slot.get("alternatives", []),
+            }
+
+        operator_name = slot["operator"]
+        operator_id = slot["operator_id"]
+        treatment_name = slot["treatment"]
+        duration = slot["duration_minutes"]
+        price = slot.get("price")
+
+        # Google Calendar event (best-effort)
+        event_id = cal_module.create_calendar_event(
+            business,
+            customer_name=customer_name,
+            treatment_name=treatment_name,
+            date_str=appt_date.isoformat(),
+            time_str=appt_time.strftime("%H:%M"),
+            duration_minutes=duration,
+            operator_name=operator_name,
+            customer_phone=customer_phone,
+        )
+
+        # Persist
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO appointments
+                        (business_id, operator_id, operator_name,
+                         customer_phone, customer_name,
+                         treatment_code, treatment_name,
+                         appointment_date, appointment_time,
+                         duration_minutes, price, status,
+                         google_event_id, platform)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'confirmed',%s,%s)
+                    RETURNING id
+                    """,
+                    (
+                        business.id,
+                        operator_id,
+                        operator_name,
+                        customer_phone,
+                        customer_name.strip(),
+                        treatment_code,
+                        treatment_name,
+                        appt_date,
+                        appt_time,
+                        duration,
+                        price,
+                        event_id,
+                        platform,
+                    ),
+                )
+                appt_id = cur.fetchone()[0]
+
+        logger.info(
+            "Appointment #%s created: %s with %s on %s at %s",
+            appt_id, treatment_name, operator_name, appt_date, appt_time,
+        )
+        return {
+            "success": True,
+            "appointment_id": appt_id,
+            "operator": operator_name,
+            "operator_id": operator_id,
+            "treatment": treatment_name,
+            "treatment_code": treatment_code,
+            "date": appt_date.isoformat(),
+            "time": appt_time.strftime("%H:%M"),
+            "duration_minutes": duration,
+            "price": price,
+            "google_event_id": event_id,
+        }
+
+    # ------------------------------------------------------------------
+    # Cancel
+    # ------------------------------------------------------------------
+
+    def cancel_appointment(
+        self,
+        business: Business,
+        customer_name: str,
+        appt_date: date,
+        appt_time: time,
+    ) -> dict:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE appointments
+                    SET status = 'cancelled'
+                    WHERE business_id = %s
+                      AND LOWER(customer_name) = LOWER(%s)
+                      AND appointment_date = %s
+                      AND appointment_time = %s
+                      AND status = 'confirmed'
+                    RETURNING id, google_event_id
+                    """,
+                    (business.id, customer_name, appt_date, appt_time),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"success": False, "error": "APPOINTMENT_NOT_FOUND"}
+
+                appt_id, event_id = row
+                if event_id:
+                    cal_module.delete_calendar_event(business, event_id)
+
+                logger.info("Appointment #%s cancelled", appt_id)
+                return {"success": True, "appointment_id": appt_id}
+
+    # ------------------------------------------------------------------
+    # Modify
+    # ------------------------------------------------------------------
+
+    def modify_appointment(
+        self,
+        business: Business,
+        customer_name: str,
+        current_date: date,
+        current_time: time,
+        new_date: Optional[date] = None,
+        new_time: Optional[time] = None,
+        new_treatment: Optional[str] = None,
+        new_operator: Optional[str] = None,
+    ) -> dict:
+        # Cancel old
+        cancel_result = self.cancel_appointment(
+            business, customer_name, current_date, current_time
+        )
+        if not cancel_result.get("success"):
+            return cancel_result
+
+        # Determine parameters for the new booking
+        target_date = new_date or current_date
+        target_time = new_time or current_time
+
+        # We need to look up original treatment if not changing
+        if not new_treatment:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT treatment_code, customer_phone
+                        FROM appointments WHERE id = %s
+                        """,
+                        (cancel_result["appointment_id"],),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        new_treatment = row[0]
+                        customer_phone = row[1]
+                    else:
+                        return {"success": False, "error": "ORIGINAL_APPOINTMENT_DATA_LOST"}
+        else:
+            # Need phone from cancelled appointment
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT customer_phone FROM appointments WHERE id = %s",
+                        (cancel_result["appointment_id"],),
+                    )
+                    row = cur.fetchone()
+                    customer_phone = row[0] if row else ""
+
+        return self.create_appointment(
+            business=business,
+            customer_phone=customer_phone,
+            customer_name=customer_name,
+            treatment_code=new_treatment,
+            appt_date=target_date,
+            appt_time=target_time,
+            preferred_operator=new_operator,
+        )
+
+    # ------------------------------------------------------------------
+    # Query
+    # ------------------------------------------------------------------
+
+    def get_customer_appointments(
+        self, business: Business, customer_phone: str
+    ) -> list[dict]:
+        phone = customer_service._normalize_phone(customer_phone)
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, operator_name, treatment_name, treatment_code,
+                           appointment_date, appointment_time, duration_minutes,
+                           price, status
+                    FROM appointments
+                    WHERE business_id = %s AND customer_phone = %s
+                      AND status = 'confirmed'
+                    ORDER BY appointment_date, appointment_time
+                    """,
+                    (business.id, phone),
+                )
+                rows = cur.fetchall()
+                return [
+                    {
+                        "appointment_id": r[0],
+                        "operator": r[1],
+                        "treatment": r[2],
+                        "treatment_code": r[3],
+                        "date": r[4].isoformat() if r[4] else None,
+                        "time": r[5].strftime("%H:%M") if r[5] else None,
+                        "duration_minutes": r[6],
+                        "price": str(r[7]) if r[7] else None,
+                        "status": r[8],
+                    }
+                    for r in rows
+                ]
+
+
+# Singleton
+booking_service = BookingService()
