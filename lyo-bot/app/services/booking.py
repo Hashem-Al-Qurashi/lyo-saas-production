@@ -74,8 +74,9 @@ class BookingService:
                          treatment_code, treatment_name,
                          appointment_date, appointment_time,
                          duration_minutes, price, status,
-                         google_event_id, platform)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'confirmed',%s,%s)
+                         google_event_id, platform,
+                         chatwoot_conversation_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'confirmed',%s,%s,%s)
                     RETURNING id
                     """,
                     (
@@ -92,6 +93,7 @@ class BookingService:
                         price,
                         event_id,
                         platform,
+                        chatwoot_conversation_id,
                     ),
                 )
                 appt_id = cur.fetchone()[0]
@@ -166,50 +168,63 @@ class BookingService:
         new_treatment: Optional[str] = None,
         new_operator: Optional[str] = None,
     ) -> dict:
-        # Cancel old
-        cancel_result = self.cancel_appointment(
-            business, customer_name, current_date, current_time
-        )
-        if not cancel_result.get("success"):
-            return cancel_result
+        # 1. Look up the original appointment BEFORE cancelling
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, treatment_code, customer_phone, google_event_id
+                    FROM appointments
+                    WHERE business_id = %s
+                      AND LOWER(customer_name) = LOWER(%s)
+                      AND appointment_date = %s
+                      AND appointment_time = %s
+                      AND status = 'confirmed'
+                    """,
+                    (business.id, customer_name, current_date, current_time),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"success": False, "error": "APPOINTMENT_NOT_FOUND"}
 
-        # Determine parameters for the new booking
+                original_id = row[0]
+                original_treatment = row[1]
+                customer_phone = row[2]
+                original_event_id = row[3]
+
         target_date = new_date or current_date
         target_time = new_time or current_time
+        treatment_code = new_treatment or original_treatment
 
-        # We need to look up original treatment if not changing
-        if not new_treatment:
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT treatment_code, customer_phone
-                        FROM appointments WHERE id = %s
-                        """,
-                        (cancel_result["appointment_id"],),
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        new_treatment = row[0]
-                        customer_phone = row[1]
-                    else:
-                        return {"success": False, "error": "ORIGINAL_APPOINTMENT_DATA_LOST"}
-        else:
-            # Need phone from cancelled appointment
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT customer_phone FROM appointments WHERE id = %s",
-                        (cancel_result["appointment_id"],),
-                    )
-                    row = cur.fetchone()
-                    customer_phone = row[0] if row else ""
+        # 2. Check if new slot is available BEFORE cancelling old
+        slot = availability_service.check_slot(
+            business, treatment_code, target_date, target_time, new_operator
+        )
+        if not slot.get("available"):
+            return {
+                "success": False,
+                "error": slot.get("reason", "NEW_SLOT_UNAVAILABLE"),
+                "alternatives": slot.get("alternatives", []),
+            }
+
+        # 3. Now safe to cancel old and create new in one flow
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE appointments SET status = 'cancelled' WHERE id = %s",
+                    (original_id,),
+                )
+
+        if original_event_id:
+            cal_module.delete_calendar_event(business, original_event_id)
+
+        logger.info("Appointment #%s cancelled for modification", original_id)
 
         return self.create_appointment(
             business=business,
             customer_phone=customer_phone,
             customer_name=customer_name,
-            treatment_code=new_treatment,
+            treatment_code=treatment_code,
             appt_date=target_date,
             appt_time=target_time,
             preferred_operator=new_operator,

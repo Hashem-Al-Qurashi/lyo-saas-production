@@ -63,4 +63,14 @@ INSERT INTO business_hours (business_id, day_of_week, is_open, open_time, close_
     ((SELECT id FROM businesses WHERE slug='aura-hair-studio'), 6, false, NULL, NULL)
 ON CONFLICT (business_id, day_of_week) DO NOTHING;
 
+-- Management user for Aura Hair Studio (password: admin123)
+INSERT INTO management_users (business_id, email, password_hash, name, role)
+VALUES (
+    (SELECT id FROM businesses WHERE slug='aura-hair-studio'),
+    'admin@aura.it',
+    '$2b$12$5a6FUaAULPkIB/DWxdp7iucURkwKrwPhhrta4CmNz1UKOxqXpJMcS',
+    'Admin',
+    'owner'
+) ON CONFLICT (email) DO NOTHING;
+
 COMMIT;

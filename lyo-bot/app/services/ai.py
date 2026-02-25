@@ -18,6 +18,7 @@ from app.tools.definitions import build_tools_for_business
 from app.utils.time_helpers import get_date_context, generate_date_calendar
 from app.services.availability import availability_service
 from app.services.booking import booking_service
+from app.services.chatwoot import chatwoot_client
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,8 @@ class AIService:
         message: str,
         conversation_history: list[dict],
         customer_name: str | None = None,
+        conversation_id: int | None = None,
+        account_id: int | None = None,
     ) -> str:
         """Process a user message and return the bot's text reply.
 
@@ -208,6 +211,8 @@ class AIService:
                         customer_name=customer_name,
                         tool_name=tool_call.function.name,
                         arguments_json=tool_call.function.arguments,
+                        conversation_id=conversation_id,
+                        account_id=account_id,
                     )
                     messages.append({
                         "role": "tool",
@@ -236,6 +241,8 @@ class AIService:
         customer_name: str | None,
         tool_name: str,
         arguments_json: str,
+        conversation_id: int | None = None,
+        account_id: int | None = None,
     ) -> str:
         """Execute a tool call and return the JSON result string."""
         try:
@@ -245,9 +252,17 @@ class AIService:
 
         logger.info("Tool call: %s(%s) for business %s", tool_name, args, business.id)
 
+        # Handle escalation async (needs Chatwoot API call)
+        if tool_name == "escalate_to_human":
+            return await self._handle_escalation(
+                account_id=account_id,
+                conversation_id=conversation_id,
+                reason=args.get("reason", ""),
+            )
+
         try:
             result = await asyncio.to_thread(
-                self._dispatch_tool, business, customer_phone, customer_name, tool_name, args
+                self._dispatch_tool, business, customer_phone, customer_name, tool_name, args, conversation_id
             )
             return json.dumps(result, default=str)
         except Exception:
@@ -261,6 +276,7 @@ class AIService:
         customer_name: str | None,
         tool_name: str,
         args: dict,
+        conversation_id: int | None = None,
     ) -> dict:
         """Synchronous dispatcher to the appropriate service method."""
         if tool_name == "create_appointment":
@@ -272,6 +288,7 @@ class AIService:
                 appt_date=date.fromisoformat(args["date"]),
                 appt_time=time.fromisoformat(args["time"]),
                 preferred_operator=args.get("operator_name"),
+                chatwoot_conversation_id=conversation_id,
             )
 
         if tool_name == "check_availability":
@@ -336,10 +353,38 @@ class AIService:
         if tool_name == "confirm_reminder":
             return self._confirm_reminder(business, customer_phone)
 
-        if tool_name == "escalate_to_human":
-            return {"escalated": True, "reason": args.get("reason", "")}
-
         return {"error": f"UNKNOWN_TOOL: {tool_name}"}
+
+    # ------------------------------------------------------------------
+    # Escalation handler
+    # ------------------------------------------------------------------
+
+    async def _handle_escalation(
+        self,
+        account_id: int | None,
+        conversation_id: int | None,
+        reason: str,
+    ) -> str:
+        """Hand conversation to a human agent via Chatwoot."""
+        if not account_id or not conversation_id:
+            logger.warning("Cannot escalate: missing account_id=%s or conversation_id=%s", account_id, conversation_id)
+            return json.dumps({"escalated": False, "reason": "MISSING_CONVERSATION_INFO"})
+
+        try:
+            # Set conversation to "open" so human agents see it in their queue
+            await chatwoot_client.toggle_conversation_status(
+                account_id=account_id,
+                conversation_id=conversation_id,
+                status="open",
+            )
+            logger.info(
+                "Escalated conversation %s (account %s) to human. Reason: %s",
+                conversation_id, account_id, reason,
+            )
+            return json.dumps({"escalated": True, "reason": reason})
+        except Exception:
+            logger.exception("Failed to escalate conversation %s", conversation_id)
+            return json.dumps({"escalated": False, "reason": "CHATWOOT_API_ERROR"})
 
     # ------------------------------------------------------------------
     # Reminder confirmation helper

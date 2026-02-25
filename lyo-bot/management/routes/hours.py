@@ -4,6 +4,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from management.auth import decode_token
 from app.models.database import get_connection
+from app.services.tenant import tenant_service
 
 router = APIRouter()
 templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
@@ -78,6 +79,7 @@ async def save_hours(request: Request):
                 (biz_id, day, is_open, open_time, close_time),
             )
 
+    tenant_service.invalidate(biz_id)
     return RedirectResponse(url="/manage/hours/", status_code=302)
 
 
@@ -98,6 +100,7 @@ async def add_closure(
             (user["business_id"], closure_date, reason or None),
         )
 
+    tenant_service.invalidate(user["business_id"])
     return RedirectResponse(url="/manage/hours/", status_code=302)
 
 
@@ -114,4 +117,5 @@ async def delete_closure(request: Request, closure_id: int):
             (closure_id, user["business_id"]),
         )
 
+    tenant_service.invalidate(user["business_id"])
     return RedirectResponse(url="/manage/hours/", status_code=302)

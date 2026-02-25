@@ -4,6 +4,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from management.auth import decode_token
 from app.models.database import get_connection
+from app.services.tenant import tenant_service
 
 router = APIRouter()
 templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
@@ -59,6 +60,7 @@ async def add_treatment(
             (user["business_id"], code, name_it, name_en or None, duration_minutes, price, sort_order),
         )
 
+    tenant_service.invalidate(user["business_id"])
     return RedirectResponse(url="/manage/treatments/", status_code=302)
 
 
@@ -72,11 +74,14 @@ async def edit_treatment(
     duration_minutes: int = Form(...),
     price: float = Form(0),
     sort_order: int = Form(0),
-    is_active: bool = Form(True),
 ):
     user = _get_user(request)
     if not user:
         return RedirectResponse(url="/manage/login", status_code=302)
+
+    # Unchecked checkboxes don't send data, so check form directly
+    form_data = await request.form()
+    is_active = "is_active" in form_data
 
     with get_connection() as conn:
         cur = conn.cursor()
@@ -88,6 +93,7 @@ async def edit_treatment(
              treatment_id, user["business_id"]),
         )
 
+    tenant_service.invalidate(user["business_id"])
     return RedirectResponse(url="/manage/treatments/", status_code=302)
 
 
@@ -104,4 +110,5 @@ async def delete_treatment(request: Request, treatment_id: int):
             (treatment_id, user["business_id"]),
         )
 
+    tenant_service.invalidate(user["business_id"])
     return RedirectResponse(url="/manage/treatments/", status_code=302)

@@ -216,6 +216,10 @@ class AvailabilityService:
         self, business: Business, appt_date: date, appt_time: time
     ) -> dict:
         """Return ``{valid: bool, reason: str}``."""
+        # Check business closures (holidays, special days)
+        if self._is_closure_date(business.id, appt_date):
+            return {"valid": False, "reason": "CLOSURE_DATE"}
+
         hours = self._get_hours_for_date(business, appt_date)
         if not hours:
             return {"valid": False, "reason": "NO_HOURS_CONFIGURED"}
@@ -233,6 +237,21 @@ class AvailabilityService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_closure_date(business_id: int, appt_date: date) -> bool:
+        """Check if *appt_date* is a closure/holiday for this business."""
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM business_closures WHERE business_id = %s AND closure_date = %s",
+                        (business_id, appt_date),
+                    )
+                    return cur.fetchone() is not None
+        except Exception:
+            logger.exception("Failed to check closure date")
+            return False
 
     def _get_hours_for_date(
         self, business: Business, appt_date: date

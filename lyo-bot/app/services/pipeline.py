@@ -169,6 +169,8 @@ class MessagePipeline:
                 message=combined,
                 conversation_history=history,
                 customer_name=customer_name,
+                conversation_id=conversation_id,
+                account_id=account_id,
             )
 
             # Save conversation
