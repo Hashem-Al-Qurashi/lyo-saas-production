@@ -43,7 +43,8 @@
         </thead>
         <tbody class="bg-white divide-y divide-gray-200">
             {% for op in operators %}
-            <tr>
+            <!-- Display row -->
+            <tr id="op-display-{{ op[0] }}">
                 <td class="px-6 py-4 text-sm">{{ op[1] }}</td>
                 <td class="px-6 py-4 text-sm font-medium">{{ op[2] }}</td>
                 <td class="px-6 py-4 text-sm">
@@ -66,9 +67,39 @@
                         <button type="submit" class="text-xs text-indigo-600 hover:text-indigo-800 ml-2">Salva</button>
                     </form>
                 </td>
-                <td class="px-6 py-4 text-sm">
+                <td class="px-6 py-4 text-sm space-x-2">
+                    <button onclick="toggleEdit('op', {{ op[0] }})" class="text-indigo-600 hover:text-indigo-800">Modifica</button>
                     <form method="post" action="/manage/operators/{{ op[0] }}/delete" class="inline">
                         <button type="submit" class="text-red-600 hover:text-red-800">Elimina</button>
+                    </form>
+                </td>
+            </tr>
+            <!-- Edit row (hidden by default) -->
+            <tr id="op-edit-{{ op[0] }}" class="hidden bg-indigo-50">
+                <td colspan="5" class="px-6 py-4">
+                    <form method="post" action="/manage/operators/{{ op[0] }}/edit" class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">ID Tecnico</label>
+                            <input type="text" name="technical_id" value="{{ op[1] }}" required class="w-full px-2 py-1 border border-gray-300 rounded text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">Nome</label>
+                            <input type="text" name="display_name" value="{{ op[2] }}" required class="w-full px-2 py-1 border border-gray-300 rounded text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">Ordine</label>
+                            <input type="number" name="sort_order" value="{{ op[4] }}" class="w-full px-2 py-1 border border-gray-300 rounded text-sm">
+                        </div>
+                        <div>
+                            <label class="inline-flex items-center text-xs">
+                                <input type="checkbox" name="is_active" value="true" {% if op[3] %}checked{% endif %} class="rounded text-indigo-600 mr-1">
+                                Attivo
+                            </label>
+                        </div>
+                        <div class="flex gap-2">
+                            <button type="submit" class="bg-indigo-600 text-white py-1 px-3 rounded text-sm hover:bg-indigo-700">Salva</button>
+                            <button type="button" onclick="toggleEdit('op', {{ op[0] }})" class="bg-gray-300 text-gray-700 py-1 px-3 rounded text-sm hover:bg-gray-400">Annulla</button>
+                        </div>
                     </form>
                 </td>
             </tr>
@@ -76,4 +107,13 @@
         </tbody>
     </table>
 </div>
+
+<script>
+function toggleEdit(prefix, id) {
+    var display = document.getElementById(prefix + '-display-' + id);
+    var edit = document.getElementById(prefix + '-edit-' + id);
+    display.classList.toggle('hidden');
+    edit.classList.toggle('hidden');
+}
+</script>
 {% endblock %}

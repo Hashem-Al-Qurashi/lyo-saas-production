@@ -29,7 +29,8 @@ async def show_settings(request: Request):
         cur = conn.cursor()
         cur.execute(
             """SELECT name, bot_name, timezone, language, owner_email,
-                      address, phone, email, chatwoot_account_id
+                      address, phone, whatsapp_phone, email, chatwoot_account_id,
+                      google_calendar_id, google_service_account_json
                FROM businesses WHERE id = %s""",
             (biz_id,),
         )
@@ -40,7 +41,9 @@ async def show_settings(request: Request):
         biz = {
             "name": row[0], "bot_name": row[1], "timezone": row[2],
             "language": row[3], "owner_email": row[4], "address": row[5],
-            "phone": row[6], "email": row[7], "chatwoot_account_id": row[8],
+            "phone": row[6], "whatsapp_phone": row[7], "email": row[8],
+            "chatwoot_account_id": row[9],
+            "google_calendar_id": row[10], "google_service_account_json": row[11],
         }
 
     return templates.TemplateResponse("settings.html", {
@@ -57,7 +60,10 @@ async def save_settings(
     owner_email: str = Form(""),
     address: str = Form(""),
     phone: str = Form(""),
+    whatsapp_phone: str = Form(""),
     email: str = Form(""),
+    google_calendar_id: str = Form("primary"),
+    google_service_account_json: str = Form(""),
 ):
     user = _get_user(request)
     if not user:
@@ -68,10 +74,13 @@ async def save_settings(
         cur = conn.cursor()
         cur.execute(
             """UPDATE businesses SET bot_name = %s, timezone = %s, language = %s,
-                      owner_email = %s, address = %s, phone = %s, email = %s
+                      owner_email = %s, address = %s, phone = %s, whatsapp_phone = %s,
+                      email = %s, google_calendar_id = %s, google_service_account_json = %s
                WHERE id = %s""",
             (bot_name, timezone, language, owner_email or None, address or None,
-             phone or None, email or None, biz_id),
+             phone or None, whatsapp_phone or None, email or None,
+             google_calendar_id or "primary", google_service_account_json or None,
+             biz_id),
         )
 
         # Get chatwoot_account_id for cache invalidation

@@ -4,8 +4,10 @@
 <h1 class="text-2xl font-bold mb-6">Impostazioni</h1>
 
 {% if business %}
-<div class="bg-white p-6 rounded-lg shadow">
-    <form method="post" action="/manage/settings/save" class="space-y-4">
+<form method="post" action="/manage/settings/save" class="space-y-6">
+    <!-- Bot & Business Settings -->
+    <div class="bg-white p-6 rounded-lg shadow">
+        <h2 class="text-lg font-semibold mb-4">Bot e Attivita</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Nome Bot</label>
@@ -45,13 +47,56 @@
                        class="w-full px-3 py-2 border border-gray-300 rounded-md">
             </div>
         </div>
-        <div class="pt-4">
-            <button type="submit" class="bg-indigo-600 text-white py-2 px-6 rounded-md hover:bg-indigo-700">
-                Salva Impostazioni
-            </button>
+    </div>
+
+    <!-- WhatsApp Configuration -->
+    <div class="bg-white p-6 rounded-lg shadow">
+        <h2 class="text-lg font-semibold mb-4">WhatsApp</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Numero WhatsApp Business</label>
+                <input type="text" name="whatsapp_phone" value="{{ business.whatsapp_phone or '' }}"
+                       placeholder="+39 333 1234567"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                <p class="mt-1 text-xs text-gray-500">Il numero associato al tuo account WhatsApp Business</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Chatwoot Account ID</label>
+                <input type="text" value="{{ business.chatwoot_account_id or '' }}" disabled
+                       class="w-full px-3 py-2 border border-gray-200 rounded-md bg-gray-50 text-gray-500">
+                <p class="mt-1 text-xs text-gray-500">Configurato dal sistema</p>
+            </div>
         </div>
-    </form>
-</div>
+    </div>
+
+    <!-- Google Calendar -->
+    <div class="bg-white p-6 rounded-lg shadow">
+        <h2 class="text-lg font-semibold mb-4">Google Calendar</h2>
+        <div class="space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Calendar ID</label>
+                <input type="text" name="google_calendar_id"
+                       value="{{ business.google_calendar_id or 'primary' }}"
+                       placeholder="primary"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                <p class="mt-1 text-xs text-gray-500">L'ID del calendario Google (es. "primary" o un indirizzo email del calendario)</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Service Account JSON</label>
+                <textarea name="google_service_account_json" rows="6"
+                          placeholder='{"type": "service_account", ...}'
+                          class="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm">{{ business.google_service_account_json or '' }}</textarea>
+                <p class="mt-1 text-xs text-gray-500">Incolla il contenuto JSON del file delle credenziali del service account</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="pt-2">
+        <button type="submit" class="bg-indigo-600 text-white py-2 px-6 rounded-md hover:bg-indigo-700">
+            Salva Impostazioni
+        </button>
+    </div>
+</form>
 {% else %}
 <div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded">
     Business non trovato.
