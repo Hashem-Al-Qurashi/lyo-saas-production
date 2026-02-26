@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 480
 
+    # Webhook security
+    webhook_secret: str = ""
+
     # Bot defaults
     default_timezone: str = "Europe/Rome"
     message_batch_delay_seconds: int = 15

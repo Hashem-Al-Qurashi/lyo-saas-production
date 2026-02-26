@@ -1,9 +1,21 @@
 import logging
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Retry on server errors and timeouts
+_RETRY_EXCEPTIONS = (httpx.TimeoutException, httpx.ConnectError)
+_RETRY_DECORATOR = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(_RETRY_EXCEPTIONS),
+    before_sleep=lambda rs: logger.warning(
+        "Chatwoot call failed (attempt %d), retrying: %s", rs.attempt_number, rs.outcome.exception()
+    ),
+)
 
 
 class ChatwootClient:
@@ -16,6 +28,7 @@ class ChatwootClient:
     # Messages
     # ------------------------------------------------------------------
 
+    @_RETRY_DECORATOR
     async def send_message(
         self,
         account_id: int,
@@ -39,6 +52,7 @@ class ChatwootClient:
     # Conversation management
     # ------------------------------------------------------------------
 
+    @_RETRY_DECORATOR
     async def toggle_conversation_status(
         self,
         account_id: int,
@@ -57,6 +71,7 @@ class ChatwootClient:
         resp.raise_for_status()
         return resp.json()
 
+    @_RETRY_DECORATOR
     async def assign_conversation(
         self,
         account_id: int,

@@ -1,12 +1,24 @@
+import logging
 import os
+
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from management.auth import authenticate_user, create_token, decode_token
+from management.csrf import CSRFMiddleware
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
+# Warn if JWT secret is the default
+if settings.jwt_secret == "change-me-in-production":
+    logger.warning("JWT_SECRET is set to default value. Change it in production!")
+
 mgmt_app = FastAPI(title="Lyo Management")
+# Order matters: SessionMiddleware must be added AFTER CSRFMiddleware
+# (middleware stack is LIFO, so session runs first)
+mgmt_app.add_middleware(CSRFMiddleware)
 mgmt_app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret)
 
 templates_dir = os.path.join(os.path.dirname(__file__), "templates")
@@ -32,7 +44,14 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
         return templates.TemplateResponse("login.html", {"request": request, "error": "Credenziali non valide"})
     token = create_token(user["email"], user["business_id"])
     response = RedirectResponse(url="/manage/dashboard", status_code=302)
-    response.set_cookie("access_token", token, httponly=True, max_age=settings.jwt_expire_minutes * 60)
+    is_secure = request.url.scheme == "https"
+    response.set_cookie(
+        "access_token", token,
+        httponly=True,
+        max_age=settings.jwt_expire_minutes * 60,
+        samesite="lax",
+        secure=is_secure,
+    )
     return response
 
 

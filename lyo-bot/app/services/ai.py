@@ -10,6 +10,7 @@ import logging
 from datetime import date, time, datetime
 
 import openai
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.config import settings
 from app.models.schemas import Business
@@ -23,6 +24,19 @@ from app.services.chatwoot import chatwoot_client
 logger = logging.getLogger(__name__)
 
 openai_client = openai.OpenAI(api_key=settings.openai_api_key)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type((openai.APITimeoutError, openai.APIConnectionError, openai.RateLimitError, openai.InternalServerError)),
+    before_sleep=lambda retry_state: logger.warning(
+        "OpenAI call failed (attempt %d), retrying: %s", retry_state.attempt_number, retry_state.outcome.exception()
+    ),
+)
+def _openai_create_with_retry(**kwargs):
+    """Call OpenAI chat.completions.create with retry on transient errors."""
+    return openai_client.chat.completions.create(**kwargs)
 
 
 # ------------------------------------------------------------------
@@ -192,7 +206,7 @@ class AIService:
 
         for _round in range(self.MAX_TOOL_ROUNDS):
             response = await asyncio.to_thread(
-                openai_client.chat.completions.create,
+                _openai_create_with_retry,
                 model=settings.openai_model,
                 messages=messages,
                 tools=tools,

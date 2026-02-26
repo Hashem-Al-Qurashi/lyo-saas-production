@@ -2,6 +2,8 @@ import logging
 from datetime import date, time
 from typing import Optional
 
+import psycopg2
+
 from app.models.database import get_connection
 from app.models.schemas import Business
 from app.services.availability import availability_service
@@ -63,40 +65,51 @@ class BookingService:
             customer_phone=customer_phone,
         )
 
-        # Persist
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO appointments
-                        (business_id, operator_id, operator_name,
-                         customer_phone, customer_name,
-                         treatment_code, treatment_name,
-                         appointment_date, appointment_time,
-                         duration_minutes, price, status,
-                         google_event_id, platform,
-                         chatwoot_conversation_id)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'confirmed',%s,%s,%s)
-                    RETURNING id
-                    """,
-                    (
-                        business.id,
-                        operator_id,
-                        operator_name,
-                        customer_phone,
-                        customer_name.strip(),
-                        treatment_code,
-                        treatment_name,
-                        appt_date,
-                        appt_time,
-                        duration,
-                        price,
-                        event_id,
-                        platform,
-                        chatwoot_conversation_id,
-                    ),
-                )
-                appt_id = cur.fetchone()[0]
+        # Persist (handle concurrent booking via unique constraint)
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO appointments
+                            (business_id, operator_id, operator_name,
+                             customer_phone, customer_name,
+                             treatment_code, treatment_name,
+                             appointment_date, appointment_time,
+                             duration_minutes, price, status,
+                             google_event_id, platform,
+                             chatwoot_conversation_id)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'confirmed',%s,%s,%s)
+                        RETURNING id
+                        """,
+                        (
+                            business.id,
+                            operator_id,
+                            operator_name,
+                            customer_phone,
+                            customer_name.strip(),
+                            treatment_code,
+                            treatment_name,
+                            appt_date,
+                            appt_time,
+                            duration,
+                            price,
+                            event_id,
+                            platform,
+                            chatwoot_conversation_id,
+                        ),
+                    )
+                    appt_id = cur.fetchone()[0]
+        except psycopg2.errors.UniqueViolation:
+            logger.warning(
+                "Concurrent booking conflict: operator %s on %s at %s",
+                operator_name, appt_date, appt_time,
+            )
+            return {
+                "success": False,
+                "error": "SLOT_JUST_TAKEN",
+                "message": "This slot was just booked by another customer. Please try a different time.",
+            }
 
         logger.info(
             "Appointment #%s created: %s with %s on %s at %s",

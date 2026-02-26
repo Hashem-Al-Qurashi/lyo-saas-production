@@ -216,6 +216,14 @@ class AvailabilityService:
         self, business: Business, appt_date: date, appt_time: time
     ) -> dict:
         """Return ``{valid: bool, reason: str}``."""
+        # Reject past dates
+        today = date.today()
+        if appt_date < today:
+            return {"valid": False, "reason": "DATE_IN_PAST"}
+        # Reject past times for today
+        if appt_date == today and appt_time < datetime.now().time():
+            return {"valid": False, "reason": "TIME_IN_PAST"}
+
         # Check business closures (holidays, special days)
         if self._is_closure_date(business.id, appt_date):
             return {"valid": False, "reason": "CLOSURE_DATE"}

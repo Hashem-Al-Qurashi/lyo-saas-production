@@ -2,8 +2,10 @@ import asyncio
 import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from app.config import settings
 from app.models.schemas import WebhookPayload
 from app.services.pipeline import pipeline
 from app.services.reminders import reminder_service
@@ -36,7 +38,18 @@ async def startup():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0"}
+    db_ok = False
+    try:
+        from app.models.database import get_connection
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                db_ok = cur.fetchone() is not None
+    except Exception:
+        logger.warning("Health check: DB connection failed")
+
+    status = "ok" if db_ok else "degraded"
+    return {"status": status, "version": "2.0.0", "db": "connected" if db_ok else "unavailable"}
 
 
 @app.post("/webhook/chatwoot")
@@ -44,6 +57,12 @@ async def chatwoot_webhook(request: Request):
     """Receive webhook from Chatwoot Agent Bot system.
     Returns 200 immediately (Chatwoot has 5s timeout).
     Processes message in background."""
+    # Validate webhook secret if configured
+    if settings.webhook_secret:
+        token = request.headers.get("X-Chatwoot-Webhook-Token", "")
+        if token != settings.webhook_secret:
+            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+
     try:
         raw = await request.json()
         payload = WebhookPayload(**raw)
