@@ -1,5 +1,6 @@
 import os
-from datetime import date, datetime
+import re
+from datetime import date
 
 from fastapi import APIRouter, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -128,7 +129,7 @@ async def api_move_appointment(request: Request, appointment_id: int):
 
     try:
         body = await request.json()
-    except Exception:
+    except (ValueError, TypeError):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
     new_date = body.get("new_date")
@@ -137,6 +138,20 @@ async def api_move_appointment(request: Request, appointment_id: int):
 
     if not new_date or not new_time:
         return JSONResponse({"error": "new_date and new_time required"}, status_code=400)
+
+    # Validate date format
+    try:
+        date.fromisoformat(str(new_date)[:10])
+    except ValueError:
+        return JSONResponse({"error": "invalid date format"}, status_code=400)
+
+    # Validate time format (HH:MM or HH:MM:SS)
+    if not re.match(r"^\d{2}:\d{2}(:\d{2})?$", str(new_time)):
+        return JSONResponse({"error": "invalid time format"}, status_code=400)
+
+    # Validate operator_id type
+    if new_operator_id is not None and not isinstance(new_operator_id, int):
+        return JSONResponse({"error": "invalid operator_id"}, status_code=400)
 
     with get_connection() as conn:
         cur = conn.cursor()
