@@ -42,7 +42,7 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
     user = authenticate_user(email, password)
     if not user:
         return templates.TemplateResponse("login.html", {"request": request, "error": "Credenziali non valide"})
-    token = create_token(user["email"], user["business_id"])
+    token = create_token(user["email"], user["business_id"], role=user.get("role", "owner"))
     response = RedirectResponse(url="/manage/dashboard", status_code=302)
     is_secure = request.url.scheme == "https"
     response.set_cookie(
@@ -71,7 +71,7 @@ async def dashboard(request: Request):
 
 
 # Import and register route modules
-from management.routes import treatments, operators, hours, settings as settings_routes, appointments, users  # noqa: E402
+from management.routes import treatments, operators, hours, settings as settings_routes, appointments, users, calendar  # noqa: E402
 
 mgmt_app.include_router(appointments.router)
 mgmt_app.include_router(treatments.router)
@@ -79,3 +79,4 @@ mgmt_app.include_router(operators.router)
 mgmt_app.include_router(hours.router)
 mgmt_app.include_router(settings_routes.router)
 mgmt_app.include_router(users.router)
+mgmt_app.include_router(calendar.router)

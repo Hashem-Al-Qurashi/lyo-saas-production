@@ -4,6 +4,7 @@ Generates a per-session CSRF token, validates it on all POST requests
 to /manage/* routes (except login, which has no prior session).
 """
 
+import hmac
 import secrets
 from urllib.parse import parse_qs
 
@@ -40,9 +41,12 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             form_data = parse_qs(body_bytes.decode("utf-8", errors="replace"))
             submitted_tokens = form_data.get("csrf_token", [])
             submitted_token = submitted_tokens[0] if submitted_tokens else ""
+            # Also accept CSRF token via header (for AJAX/fetch calls)
+            if not submitted_token:
+                submitted_token = request.headers.get("X-CSRF-Token", "")
             expected_token = request.session.get("csrf_token", "")
 
-            if not submitted_token or submitted_token != expected_token:
+            if not submitted_token or not hmac.compare_digest(submitted_token, expected_token):
                 return Response("CSRF token invalid", status_code=403)
 
         return await call_next(request)
