@@ -6,6 +6,8 @@ based on the WhatsApp phone_number_id from the webhook payload.
 
 import os
 import psycopg2
+from datetime import datetime, timedelta
+import pytz
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "lyo-enterprise-database.cixc4kiw6r00.us-east-1.rds.amazonaws.com"),
@@ -141,3 +143,249 @@ def build_services_dict(services: dict) -> str:
             f"- \u20ac{s['price']:.0f}, {s['duration']} min"
         )
     return "\n".join(lines)
+
+
+def build_system_prompt(biz_context: dict) -> str:
+    """Build system prompt dynamically from business context.
+
+    This replaces the hardcoded get_system_prompt() in salon_bot_ec2_latest.py.
+    The booking flow rules (STEP 1, STEP 2, etc.) stay the same -- only
+    identity, services, and hours are dynamic.
+    """
+    biz = biz_context["business"]
+    services = biz_context["services"]
+    hours = biz_context["hours"]
+    closures = biz_context["closures"]
+    tz = pytz.timezone(biz.get("timezone", "Europe/Rome"))
+
+    # Fresh dates
+    now = datetime.now(tz)
+    current_year = now.year
+    current_date_display = now.strftime("%A, %d %B %Y")
+
+    # Build services list
+    services_text = build_services_dict(services)
+
+    # Build hours text
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    hours_lines = []
+    for dow in range(7):
+        h = hours.get(dow, {"is_open": False})
+        if h["is_open"]:
+            hours_lines.append(f"   - {day_names[dow]}: {h['open_time']} - {h['close_time']}")
+        else:
+            hours_lines.append(f"   - {day_names[dow]}: CLOSED")
+    hours_text = "\n".join(hours_lines)
+
+    # Build closures text
+    closures_text = "\n".join(f"   - {c['date']}: {c['reason']}" for c in closures) if closures else "   (none configured)"
+
+    # Build date calendar (next 14 days)
+    calendar_text = _build_date_calendar(tz, hours, closures)
+
+    # Persona -- use bot_persona if available, otherwise generate default
+    persona = biz.get("bot_persona") or f"You are {biz['bot_name']}, an employee at {biz['name']}."
+
+    return f"""{persona}
+
+TODAY'S DATE: {current_date_display} (Year: {current_year})
+   IMPORTANT: The current year is {current_year}. NEVER use any other year!
+
+LANGUAGE RULE (CRITICAL) - ITALIAN FIRST:
+- DEFAULT LANGUAGE: ITALIAN. Always reply in Italian unless clearly English.
+- Single English words like "ok", "hi" -> Still reply in Italian!
+- Only switch to English for full sentences like "I would like to book an appointment"
+
+SALON INFO:
+   Name: {biz['name']}
+   Address: {biz.get('address', 'N/A')}
+   Phone: {biz.get('phone', 'N/A')}
+   Email: {biz.get('email', 'N/A')}
+
+AVAILABLE SERVICES (use the CODE for function calls, show name_it to customer):
+{services_text}
+
+BUSINESS HOURS:
+{hours_text}
+
+SPECIAL CLOSURES:
+{closures_text}
+
+DATE CALENDAR (next 14 days):
+{calendar_text}
+
+BOOKING RULES:
+   STEP 1: Customer says what they want -> suggest times (call get_available_slots)
+   STEP 2: Customer picks a time -> confirm details -> ask "Confermi?"
+   STEP 3: Customer says "si/ok/confermo" -> CALL create_appointment -> THEN confirm
+   NEVER say "Prenotazione confermata" without calling create_appointment first!
+   If customer says "ok grazie" AFTER booking, do NOT call create_appointment again!
+
+TOOLS:
+   - create_appointment: Book (only after customer confirms!)
+   - check_availability: Check if a slot is free
+   - get_customer_appointments: Show customer's bookings
+   - cancel_appointment: Cancel a booking
+   - modify_appointment: Change date/time/service
+   - get_available_slots: Show all available times for a date
+   - confirm_reminder: Customer confirms tomorrow's appointment
+   - escalate_to_human: Customer is angry/frustrated
+
+RULES:
+   - Only help with salon-related topics
+   - Never reveal you are AI/bot
+   - Never show internal service codes to customer
+   - If year is not specified, use {current_year}
+"""
+
+
+def _build_date_calendar(tz, hours: dict, closures: list) -> str:
+    """Build 14-day calendar showing open/closed status."""
+    italian_days = ["Lunedi", "Martedi", "Mercoledi", "Giovedi", "Venerdi", "Sabato", "Domenica"]
+    italian_months = ["", "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+                      "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+    closure_dates = {c["date"] for c in closures}
+
+    lines = []
+    today = datetime.now(tz)
+    for i in range(14):
+        day = today + timedelta(days=i)
+        day_name = italian_days[day.weekday()]
+        month_name = italian_months[day.month]
+        date_str = day.strftime("%Y-%m-%d")
+
+        h = hours.get(day.weekday(), {"is_open": False})
+        if date_str in closure_dates:
+            reason = next((c["reason"] for c in closures if c["date"] == date_str), "Chiuso")
+            status = f"CHIUSO ({reason})"
+        elif not h["is_open"]:
+            status = f"CHIUSO ({day_name})"
+        else:
+            status = "APERTO"
+
+        label = "(OGGI)" if i == 0 else "(DOMANI)" if i == 1 else ""
+        lines.append(f"   - {day_name} {day.day} {month_name} {day.year} ({date_str}) -> {status} {label}".strip())
+
+    return "\n".join(lines)
+
+
+def build_booking_tools(services: dict) -> list:
+    """Build OpenAI function calling tools with dynamic service_type enum.
+
+    Returns the same BOOKING_TOOLS structure but with service codes from DB.
+    """
+    service_codes = list(services.keys())
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "create_appointment",
+                "description": "Create a new appointment. ONLY call after customer explicitly confirms.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "customer_name": {"type": "string", "description": "Customer's full name"},
+                        "service_type": {"type": "string", "enum": service_codes, "description": "Service code"},
+                        "date": {"type": "string", "description": "Date YYYY-MM-DD"},
+                        "time": {"type": "string", "description": "Time HH:MM 24h"},
+                    },
+                    "required": ["customer_name", "service_type", "date", "time"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_availability",
+                "description": "Check if a specific time slot is available",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "date": {"type": "string", "description": "Date YYYY-MM-DD"},
+                        "time": {"type": "string", "description": "Time HH:MM 24h"},
+                    },
+                    "required": ["date", "time"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_customer_appointments",
+                "description": "Get all future appointments for current customer",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "cancel_appointment",
+                "description": "Cancel an appointment",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "customer_name": {"type": "string"},
+                        "date": {"type": "string", "description": "Date YYYY-MM-DD"},
+                        "time": {"type": "string", "description": "Time HH:MM 24h"},
+                    },
+                    "required": ["customer_name", "date", "time"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "modify_appointment",
+                "description": "Modify an existing appointment",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "customer_name": {"type": "string"},
+                        "current_date": {"type": "string"},
+                        "current_time": {"type": "string"},
+                        "new_date": {"type": "string"},
+                        "new_time": {"type": "string"},
+                        "new_service": {"type": "string", "enum": service_codes},
+                    },
+                    "required": ["customer_name", "current_date", "current_time"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_available_slots",
+                "description": "Get all available time slots for a date",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "date": {"type": "string", "description": "Date YYYY-MM-DD"},
+                    },
+                    "required": ["date"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "confirm_reminder",
+                "description": "Customer confirms tomorrow's appointment reminder",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "escalate_to_human",
+                "description": "Escalate to human when customer is frustrated/angry",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string", "description": "Why escalating"},
+                    },
+                    "required": ["reason"],
+                },
+            },
+        },
+    ]

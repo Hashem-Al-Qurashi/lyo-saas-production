@@ -175,3 +175,85 @@ class TestWebhookPhoneNumberExtraction:
         from business_context import extract_phone_number_id
         value = {"messages": []}
         assert extract_phone_number_id(value) is None
+
+
+def _make_biz_context():
+    """Helper to create test business context."""
+    return {
+        "business": {
+            "id": 1, "name": "Test Salon", "bot_name": "TestBot",
+            "bot_persona": "You are TestBot at Test Salon.",
+            "address": "Via Test 1", "phone": "+39 000", "email": "test@test.it",
+            "timezone": "Europe/Rome", "language": "it",
+            "owner_email": "owner@test.it",
+        },
+        "services": {
+            "taglio_donna": {"name_it": "Taglio Donna", "name_en": "Haircut", "price": 60, "duration": 45, "description": None},
+        },
+        "hours": {
+            0: {"is_open": False, "open_time": None, "close_time": None},
+            1: {"is_open": True, "open_time": "09:00", "close_time": "19:00"},
+        },
+        "closures": [{"date": "2026-12-25", "reason": "Natale"}],
+    }
+
+
+class TestBuildSystemPrompt:
+    """Build system prompt dynamically from business context."""
+
+    def test_prompt_includes_business_name(self):
+        from business_context import build_system_prompt
+        biz_context = _make_biz_context()
+        prompt = build_system_prompt(biz_context)
+        assert "Test Salon" in prompt
+
+    def test_prompt_includes_bot_name(self):
+        from business_context import build_system_prompt
+        biz_context = _make_biz_context()
+        prompt = build_system_prompt(biz_context)
+        assert "TestBot" in prompt
+
+    def test_prompt_includes_services(self):
+        from business_context import build_system_prompt
+        biz_context = _make_biz_context()
+        prompt = build_system_prompt(biz_context)
+        assert "taglio_donna" in prompt
+        assert "60" in prompt
+
+    def test_prompt_includes_hours(self):
+        from business_context import build_system_prompt
+        biz_context = _make_biz_context()
+        prompt = build_system_prompt(biz_context)
+        assert "09:00" in prompt
+
+    def test_prompt_includes_closures(self):
+        from business_context import build_system_prompt
+        biz_context = _make_biz_context()
+        prompt = build_system_prompt(biz_context)
+        assert "Natale" in prompt
+
+
+class TestBuildBookingTools:
+    """Build OpenAI tool definitions dynamically."""
+
+    def test_service_enum_matches_db(self):
+        from business_context import build_booking_tools
+        services = {"taglio_donna": {"name_it": "Taglio Donna", "name_en": "Haircut", "price": 60, "duration": 45}}
+        tools = build_booking_tools(services)
+        # Find create_appointment tool
+        create_tool = next(t for t in tools if t["function"]["name"] == "create_appointment")
+        enum_values = create_tool["function"]["parameters"]["properties"]["service_type"]["enum"]
+        assert "taglio_donna" in enum_values
+        assert len(enum_values) == 1  # Only services from DB
+
+    def test_returns_all_tool_types(self):
+        from business_context import build_booking_tools
+        services = {"taglio_donna": {"name_it": "Taglio", "name_en": "Cut", "price": 60, "duration": 45}}
+        tools = build_booking_tools(services)
+        tool_names = [t["function"]["name"] for t in tools]
+        assert "create_appointment" in tool_names
+        assert "check_availability" in tool_names
+        assert "get_customer_appointments" in tool_names
+        assert "cancel_appointment" in tool_names
+        assert "get_available_slots" in tool_names
+        assert "escalate_to_human" in tool_names
