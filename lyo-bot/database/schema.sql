@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS businesses (
     address TEXT,
     phone VARCHAR(50),
     whatsapp_phone VARCHAR(50),
+    whatsapp_phone_number_id VARCHAR(50),
+    waba_id VARCHAR(50),
+    meta_access_token TEXT,
     email VARCHAR(255),
     google_calendar_id VARCHAR(255) DEFAULT 'primary',
     google_service_account_json TEXT,
@@ -168,5 +171,6 @@ CREATE INDEX IF NOT EXISTS idx_appointments_status ON appointments(status);
 CREATE INDEX IF NOT EXISTS idx_conversations_business_phone ON conversations(business_id, customer_phone);
 CREATE INDEX IF NOT EXISTS idx_business_hours_business ON business_hours(business_id);
 CREATE INDEX IF NOT EXISTS idx_business_closures_date ON business_closures(business_id, closure_date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_businesses_wa_phone_id ON businesses(whatsapp_phone_number_id) WHERE whatsapp_phone_number_id IS NOT NULL;
 
 COMMIT;

@@ -2,11 +2,14 @@
 
 BEGIN;
 
-INSERT INTO businesses (chatwoot_account_id, name, slug, timezone, language, bot_name, address, phone, email, owner_email, google_calendar_id)
+INSERT INTO businesses (chatwoot_account_id, name, slug, timezone, language, bot_name, bot_persona, address, phone, email, owner_email, google_calendar_id, whatsapp_phone_number_id)
 VALUES (1, 'Aura Hair Studio', 'aura-hair-studio', 'Europe/Rome', 'it', 'Simone',
+        'You are Simone, a HUMAN employee at Aura Hair Studio. You are friendly, professional, and always reply in Italian unless the customer writes in English. Never reveal you are AI.',
         'Via Example 123, 20121 Milano', '+39 02 1234567', 'info@aurahair.it',
-        'notifiche.lyo@gmail.com', 'primary')
-ON CONFLICT (chatwoot_account_id) DO NOTHING;
+        'notifiche.lyo@gmail.com', 'primary', '961636900357709')
+ON CONFLICT (chatwoot_account_id) DO UPDATE SET
+    whatsapp_phone_number_id = EXCLUDED.whatsapp_phone_number_id,
+    bot_persona = EXCLUDED.bot_persona;
 
 INSERT INTO operators (business_id, technical_id, display_name, sort_order) VALUES
     ((SELECT id FROM businesses WHERE slug='aura-hair-studio'), 'operatore_1', 'Giulia', 1),
