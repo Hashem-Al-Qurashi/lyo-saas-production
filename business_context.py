@@ -127,6 +127,11 @@ def load_closures(business_id: int) -> list:
     return [{"date": d, "reason": r} for d, r in rows]
 
 
+def extract_phone_number_id(value: dict) -> str | None:
+    """Extract phone_number_id from Meta webhook payload value object."""
+    return value.get("metadata", {}).get("phone_number_id")
+
+
 def build_services_dict(services: dict) -> str:
     """Build service list string for AI system prompt."""
     lines = []

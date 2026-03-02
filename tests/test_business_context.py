@@ -158,3 +158,20 @@ class TestBuildServicesDict:
     def test_empty_services(self):
         result = build_services_dict({})
         assert result == ""
+
+
+class TestWebhookPhoneNumberExtraction:
+    """Extract phone_number_id from Meta webhook payload."""
+
+    def test_extracts_phone_number_id(self):
+        from business_context import extract_phone_number_id
+        value = {
+            "metadata": {"phone_number_id": "961636900357709"},
+            "messages": [{"from": "393331234567", "type": "text", "text": {"body": "Ciao"}}],
+        }
+        assert extract_phone_number_id(value) == "961636900357709"
+
+    def test_returns_none_when_missing(self):
+        from business_context import extract_phone_number_id
+        value = {"messages": []}
+        assert extract_phone_number_id(value) is None

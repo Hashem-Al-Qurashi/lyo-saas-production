@@ -32,6 +32,16 @@ from email.mime.multipart import MIMEMultipart
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+# Business context (multi-tenant)
+from business_context import (
+    load_business_by_phone_number_id,
+    load_services,
+    load_business_hours,
+    load_closures,
+    extract_phone_number_id,
+    BusinessNotFoundError,
+)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -169,6 +179,13 @@ async def process_buffered_messages(phone: str):
             logger.info(f"⚠️ No messages in buffer for {phone} when timer fired")
             return
 
+        # Get business context from buffered messages
+        biz_context = None
+        for msg in messages:
+            if "biz_context" in msg:
+                biz_context = msg["biz_context"]
+                break
+
         # Get contact name from first message
         contact_name = messages[0].get("contact_name", "Cliente")
 
@@ -196,10 +213,13 @@ async def process_buffered_messages(phone: str):
         pending_messages.pop(phone, None)
         pending_timers.pop(phone, None)
 
-async def handle_buffered_message(phone: str, text: str, contact_name: str):
+async def handle_buffered_message(phone: str, text: str, contact_name: str, biz_context: dict = None):
     """Handle incoming message with batching - buffer and start/reset timer"""
     # Add to buffer
     add_to_message_buffer(phone, text, contact_name)
+    # Store biz_context for when timer fires
+    if biz_context and phone in pending_messages:
+        pending_messages[phone][-1]["biz_context"] = biz_context
 
     # Cancel existing timer if any
     if phone in pending_timers:
@@ -2994,10 +3014,37 @@ async def webhook(request: Request):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
                 messages = value.get("messages", [])
-                
+
+                if not messages:
+                    continue
+
+                # --- MULTI-TENANT ROUTING ---
+                phone_number_id = extract_phone_number_id(value)
+                if not phone_number_id:
+                    logger.warning("No phone_number_id in webhook payload")
+                    continue
+
+                try:
+                    business = load_business_by_phone_number_id(phone_number_id)
+                except BusinessNotFoundError:
+                    logger.warning(f"No business for phone_number_id={phone_number_id}")
+                    continue
+
+                business_services = load_services(business["id"])
+                business_hours = load_business_hours(business["id"])
+                business_closures = load_closures(business["id"])
+
+                biz_context = {
+                    "business": business,
+                    "services": business_services,
+                    "hours": business_hours,
+                    "closures": business_closures,
+                }
+                # --- END ROUTING ---
+
                 for message in messages:
-                    await process_message(message, value)
-        
+                    await process_message(message, value, biz_context)
+
         return JSONResponse({"status": "processed"})
     
     except Exception as e:
@@ -3045,9 +3092,11 @@ async def instagram_webhook(request: Request):
         return JSONResponse({"status": "error"})
 
 
-async def process_message(message: Dict[str, Any], value: Dict[str, Any]):
+async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_context: dict = None):
     """Process incoming message"""
     try:
+        business = biz_context["business"] if biz_context else {}
+
         phone = message.get("from")
         message_id = message.get("id")
         message_type = message.get("type", "text")
@@ -3056,7 +3105,8 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any]):
         contacts = value.get("contacts", [])
         contact_name = contacts[0].get("profile", {}).get("name", "Cliente") if contacts else "Cliente"
 
-        logger.info(f"💬 Message from {phone} ({contact_name})")
+        biz_name = business.get("name", "Unknown") if business else "Unknown"
+        logger.info(f"💬 [{biz_name}] Message from {phone} ({contact_name})")
 
         await mark_as_read(message_id)
 
@@ -3072,7 +3122,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any]):
 
                 if MESSAGE_BATCHING_ENABLED:
                     # Buffer the message and start/reset timer
-                    await handle_buffered_message(phone, text, contact_name)
+                    await handle_buffered_message(phone, text, contact_name, biz_context)
                 else:
                     # Original immediate processing (fallback)
                     response = get_ai_response(phone, text)
