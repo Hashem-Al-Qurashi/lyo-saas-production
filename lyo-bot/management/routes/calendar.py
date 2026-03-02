@@ -2,7 +2,7 @@ import os
 from datetime import date, datetime
 
 from fastapi import APIRouter, Request, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from management.auth import decode_token
 from app.models.database import get_connection
@@ -17,6 +17,18 @@ def _get_user(request: Request):
     if not token:
         return None
     return decode_token(token)
+
+
+@router.get("/manage/calendar/", response_class=HTMLResponse)
+async def calendar_page(request: Request):
+    user = _get_user(request)
+    if not user:
+        return RedirectResponse(url="/manage/login", status_code=302)
+
+    return templates.TemplateResponse("calendar.html", {
+        "request": request,
+        "user": user,
+    })
 
 
 @router.get("/manage/api/operators")

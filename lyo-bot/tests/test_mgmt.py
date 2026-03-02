@@ -617,3 +617,45 @@ class TestCalendarAPIMoveAppointment:
     def test_unauthenticated_returns_401_or_403(self):
         resp = client.post("/manage/api/appointments/10/move", json={})
         assert resp.status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# Calendar Page (Task 5)
+# ---------------------------------------------------------------------------
+
+class TestCalendarPage:
+    """GET /manage/calendar/ returns calendar HTML page."""
+
+    def test_calendar_page_returns_200(self):
+        cookies = _auth_cookie()
+        resp = client.get("/manage/calendar/", cookies=cookies)
+        assert resp.status_code == 200
+        assert "fullcalendar" in resp.text.lower() or "FullCalendar" in resp.text
+
+    def test_calendar_page_has_csrf_meta(self):
+        cookies = _auth_cookie()
+        resp = client.get("/manage/calendar/", cookies=cookies)
+        assert 'csrf-token' in resp.text
+
+    def test_unauthenticated_redirects(self):
+        resp = client.get("/manage/calendar/", follow_redirects=False)
+        assert resp.status_code == 302
+
+
+# ---------------------------------------------------------------------------
+# Calendar Navigation (Task 6)
+# ---------------------------------------------------------------------------
+
+class TestCalendarNavigation:
+    """Calendar is accessible from navigation and dashboard."""
+
+    def test_nav_has_calendario_link(self):
+        cookies = _auth_cookie()
+        resp = client.get("/manage/dashboard", cookies=cookies)
+        assert '/manage/calendar/' in resp.text
+        assert 'Calendario' in resp.text
+
+    def test_dashboard_has_calendario_card(self):
+        cookies = _auth_cookie()
+        resp = client.get("/manage/dashboard", cookies=cookies)
+        assert 'Calendario' in resp.text

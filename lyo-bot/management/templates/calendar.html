@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Calendario - Lyo Management{% endblock %}
+{% block content %}
+<div class="flex justify-between items-center mb-4">
+    <h1 class="text-2xl font-bold">Calendario</h1>
+    <a href="/manage/appointments/" class="text-sm text-indigo-600 hover:text-indigo-800">Vista tabella &rarr;</a>
+</div>
+
+<div id="calendar" class="bg-white rounded-lg shadow p-4"></div>
+
+<!-- FullCalendar v6 CDN -->
+<link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@fullcalendar/resource@6.1.11/index.global.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@fullcalendar/resource-timegrid@6.1.11/index.global.min.js"></script>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    var csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    var calendarEl = document.getElementById('calendar');
+
+    var calendar = new FullCalendar.Calendar(calendarEl, {
+        schedulerLicenseKey: 'GPL-My-Project-Is-Open-Source',
+        initialView: 'resourceTimeGridDay',
+        headerToolbar: {
+            left: 'prev,next today',
+            center: 'title',
+            right: 'resourceTimeGridDay,timeGridWeek'
+        },
+        locale: 'it',
+        timeZone: 'Europe/Rome',
+        slotMinTime: '08:00:00',
+        slotMaxTime: '21:00:00',
+        slotDuration: '00:15:00',
+        allDaySlot: false,
+        editable: true,
+        eventDurationEditable: false,
+        height: 'auto',
+
+        resources: {
+            url: '/manage/api/operators',
+            method: 'GET'
+        },
+
+        events: {
+            url: '/manage/api/appointments',
+            method: 'GET'
+        },
+
+        eventDrop: function(info) {
+            var evt = info.event;
+            var newResource = evt.getResources()[0];
+            fetch('/manage/api/appointments/' + evt.id + '/move', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken
+                },
+                body: JSON.stringify({
+                    new_date: evt.start.toISOString().slice(0, 10),
+                    new_time: evt.start.toTimeString().slice(0, 5),
+                    new_operator_id: newResource ? parseInt(newResource.id) : null
+                })
+            }).then(function(resp) {
+                if (!resp.ok) {
+                    info.revert();
+                    alert('Errore nello spostamento');
+                }
+            }).catch(function() {
+                info.revert();
+                alert('Errore di rete');
+            });
+        },
+
+        eventClick: function(info) {
+            var props = info.event.extendedProps;
+            alert(
+                info.event.title + '\n' +
+                'Tel: ' + (props.phone || '-') + '\n' +
+                'Operatore: ' + (props.operator || '-') + '\n' +
+                'Stato: ' + (props.status || '-') + '\n' +
+                'Prezzo: \u20ac' + (props.price || 0)
+            );
+        },
+
+        windowResize: function(arg) {
+            if (window.innerWidth < 768) {
+                calendar.changeView('listDay');
+            } else {
+                if (calendar.view.type === 'listDay') {
+                    calendar.changeView('resourceTimeGridDay');
+                }
+            }
+        }
+    });
+
+    calendar.render();
+
+    if (window.innerWidth < 768) {
+        calendar.changeView('listDay');
+    }
+});
+</script>
+
+<style>
+    .fc .fc-button-primary {
+        background-color: #4f46e5 !important;
+        border-color: #4f46e5 !important;
+    }
+    .fc .fc-button-primary:hover {
+        background-color: #4338ca !important;
+    }
+    .fc .fc-button-primary:not(:disabled).fc-button-active {
+        background-color: #3730a3 !important;
+    }
+    .fc .fc-today-button {
+        text-transform: capitalize;
+    }
+    .fc-event {
+        cursor: pointer;
+        border: none !important;
+        font-size: 0.75rem;
+        padding: 2px 4px;
+    }
+    .fc .fc-col-header-cell {
+        background-color: #f9fafb;
+        font-weight: 600;
+    }
+</style>
+{% endblock %}
