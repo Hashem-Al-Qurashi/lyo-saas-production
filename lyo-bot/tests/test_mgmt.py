@@ -514,3 +514,106 @@ class TestCalendarAPIOperators:
     def test_unauthenticated_returns_401(self):
         resp = client.get("/manage/api/operators")
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Calendar API — Appointments endpoint (Task 3)
+# ---------------------------------------------------------------------------
+
+class TestCalendarAPIAppointments:
+    """GET /manage/api/appointments returns FullCalendar event objects."""
+
+    @patch("management.routes.calendar.get_connection")
+    def test_returns_appointments_as_events(self, mock_conn):
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [
+            (10, "Maria Rossi", "+39123", "Taglio Donna", "taglio_donna",
+             "Giulia", "2026-03-02", "10:00:00", 45, "confirmed", 60.00, 1),
+        ]
+        mock_conn.return_value.__enter__ = lambda s: MagicMock(cursor=lambda: mock_cur)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        cookies = _auth_cookie()
+        resp = client.get(
+            "/manage/api/appointments?start=2026-03-02&end=2026-03-03",
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        evt = data[0]
+        assert evt["id"] == 10
+        assert evt["title"] == "Maria Rossi\nTaglio Donna"
+        assert evt["start"] == "2026-03-02T10:00:00"
+        assert evt["end"] == "2026-03-02T10:45:00"
+        assert evt["resourceId"] == 1
+        assert evt["color"] == "#16a34a"
+
+    @patch("management.routes.calendar.get_connection")
+    def test_cancelled_appointment_is_red(self, mock_conn):
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [
+            (11, "Luca B", "+39456", "Piega", "piega",
+             "Martina", "2026-03-02", "14:00:00", 30, "cancelled", 30.00, 2),
+        ]
+        mock_conn.return_value.__enter__ = lambda s: MagicMock(cursor=lambda: mock_cur)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        cookies = _auth_cookie()
+        resp = client.get(
+            "/manage/api/appointments?start=2026-03-02&end=2026-03-03",
+            cookies=cookies,
+        )
+        data = resp.json()
+        assert data[0]["color"] == "#dc2626"
+
+    def test_missing_dates_returns_400(self):
+        cookies = _auth_cookie()
+        resp = client.get("/manage/api/appointments", cookies=cookies)
+        assert resp.status_code == 400
+
+    def test_unauthenticated_returns_401(self):
+        resp = client.get("/manage/api/appointments?start=2026-03-02&end=2026-03-03")
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Calendar API — Move Appointment (Task 4)
+# ---------------------------------------------------------------------------
+
+class TestCalendarAPIMoveAppointment:
+    """POST /manage/api/appointments/{id}/move reschedules via drag-and-drop."""
+
+    @patch("management.routes.calendar.get_connection")
+    def test_move_updates_date_time_operator(self, mock_conn):
+        mock_cur = MagicMock()
+        mock_cur.rowcount = 1
+        mock_cur.fetchone.return_value = ("Martina",)
+        mock_conn.return_value.__enter__ = lambda s: MagicMock(cursor=lambda: mock_cur)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        cookies = _auth_cookie()
+        # Need CSRF for POST - get via header
+        get_resp = client.get("/manage/login", cookies=cookies)
+        all_cookies = dict(cookies)
+        session_cookie = get_resp.cookies.get("session")
+        if session_cookie:
+            all_cookies["session"] = session_cookie
+        get_resp2 = client.get("/manage/dashboard", cookies=all_cookies)
+        csrf_match = re.search(r'csrf-token" content="([^"]+)"', get_resp2.text)
+        csrf_token = csrf_match.group(1) if csrf_match else ""
+        if get_resp2.cookies.get("session"):
+            all_cookies["session"] = get_resp2.cookies.get("session")
+
+        resp = client.post(
+            "/manage/api/appointments/10/move",
+            json={"new_date": "2026-03-03", "new_time": "11:00", "new_operator_id": 2},
+            cookies=all_cookies,
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "moved"
+
+    def test_unauthenticated_returns_401_or_403(self):
+        resp = client.post("/manage/api/appointments/10/move", json={})
+        assert resp.status_code in (401, 403)
