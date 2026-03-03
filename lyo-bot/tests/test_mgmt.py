@@ -724,3 +724,41 @@ class TestWhatsAppStatus:
     def test_unauthenticated_returns_401(self):
         resp = client.get("/manage/api/whatsapp/status")
         assert resp.status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp Connection UI (Task 12)
+# ---------------------------------------------------------------------------
+
+class TestWhatsAppSettings:
+    """Settings page shows WhatsApp connection status."""
+
+    def test_settings_has_whatsapp_section(self):
+        mock_row = (
+            "Aura", "Assistente", "Europe/Rome", "it", "admin@aura.it",
+            "Via Roma 1", "+39123", "+39456", "info@aura.it", 1,
+            "primary", None, '{}'
+        )
+        with patch("management.routes.settings.get_connection") as mock_conn:
+            mock_cur = MagicMock()
+            mock_cur.fetchone.return_value = mock_row
+            mock_conn.return_value.__enter__ = lambda s: MagicMock(cursor=lambda: mock_cur)
+            mock_conn.return_value.__exit__ = lambda s, *a: None
+            cookies = _auth_cookie()
+            resp = client.get("/manage/settings/", cookies=cookies)
+            assert "WhatsApp Business" in resp.text
+
+    def test_settings_shows_connect_button(self):
+        mock_row = (
+            "Aura", "Assistente", "Europe/Rome", "it", "admin@aura.it",
+            "Via Roma 1", "+39123", "+39456", "info@aura.it", 1,
+            "primary", None, '{}'
+        )
+        with patch("management.routes.settings.get_connection") as mock_conn:
+            mock_cur = MagicMock()
+            mock_cur.fetchone.return_value = mock_row
+            mock_conn.return_value.__enter__ = lambda s: MagicMock(cursor=lambda: mock_cur)
+            mock_conn.return_value.__exit__ = lambda s, *a: None
+            cookies = _auth_cookie()
+            resp = client.get("/manage/settings/", cookies=cookies)
+            assert "Collega WhatsApp" in resp.text or "wa-connect-btn" in resp.text
