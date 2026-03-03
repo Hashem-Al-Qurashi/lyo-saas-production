@@ -124,8 +124,6 @@ SMTP_PORT = 587
 # Chat blocking for complaints (phone -> blocked_reason)
 chat_blocked: Dict[str, str] = {}
 
-# Platform tracking (phone/user_id -> "whatsapp" or "instagram")
-user_platform: Dict[str, str] = {}
 
 # ============================================================================
 # MESSAGE BATCHING (IMP-005)
@@ -851,7 +849,7 @@ def get_tomorrow_appointments(business_id: int = None) -> List[Dict]:
 
         tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        if business_id:
+        if business_id is not None:
             # Multi-tenant: new appointments table
             cur.execute("""
                 SELECT id, customer_phone, customer_name, treatment_code,
@@ -938,12 +936,12 @@ def mark_reminder_sent(appointment_id: int, business_id: int = None) -> bool:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        table = "appointments" if business_id else "salon_appointments"
-        cur.execute(f"""
-            UPDATE {table}
-            SET reminder_sent_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-        """, (appointment_id,))
+        if business_id is not None:
+            cur.execute("""UPDATE appointments SET reminder_sent_at = CURRENT_TIMESTAMP WHERE id = %s""",
+                        (appointment_id,))
+        else:
+            cur.execute("""UPDATE salon_appointments SET reminder_sent_at = CURRENT_TIMESTAMP WHERE id = %s""",
+                        (appointment_id,))
         conn.commit()
         cur.close()
         conn.close()
@@ -962,32 +960,46 @@ def mark_reminder_confirmed(phone: str, business_id: int = None) -> Dict:
         today = datetime.now(ITALY_TZ).strftime("%Y-%m-%d")
         normalized_phone = normalize_phone(phone)
 
-        table = "appointments" if business_id else "salon_appointments"
-        biz_filter = "AND business_id = %s" if business_id else ""
-        biz_params = (business_id,) if business_id else ()
-        service_col = "treatment_code" if business_id else "service_type"
-
         # Find the NEXT upcoming appointment from this phone (not just tomorrow)
         # This fixes BUG-006: allows confirmation for any future appointment
-        cur.execute(f"""
-            UPDATE {table}
-            SET reminder_confirmed = TRUE,
-                reminder_confirmed_at = CURRENT_TIMESTAMP
-            WHERE customer_phone = %s
-              AND appointment_date >= %s
-              {biz_filter}
-              AND status = 'confirmed'
-              AND id = (
-                  SELECT id FROM {table}
-                  WHERE customer_phone = %s
-                    AND appointment_date >= %s
-                    {biz_filter}
-                    AND status = 'confirmed'
-                  ORDER BY appointment_date, appointment_time
-                  LIMIT 1
-              )
-            RETURNING id, customer_name, {service_col}, appointment_date, appointment_time
-        """, (normalized_phone, today) + biz_params + (normalized_phone, today) + biz_params)
+        if business_id is not None:
+            cur.execute("""
+                UPDATE appointments
+                SET reminder_confirmed = TRUE,
+                    reminder_confirmed_at = CURRENT_TIMESTAMP
+                WHERE customer_phone = %s
+                  AND appointment_date >= %s
+                  AND business_id = %s
+                  AND status = 'confirmed'
+                  AND id = (
+                      SELECT id FROM appointments
+                      WHERE customer_phone = %s
+                        AND appointment_date >= %s
+                        AND business_id = %s
+                        AND status = 'confirmed'
+                      ORDER BY appointment_date, appointment_time
+                      LIMIT 1
+                  )
+                RETURNING id, customer_name, treatment_code, appointment_date, appointment_time
+            """, (normalized_phone, today, business_id, normalized_phone, today, business_id))
+        else:
+            cur.execute("""
+                UPDATE salon_appointments
+                SET reminder_confirmed = TRUE,
+                    reminder_confirmed_at = CURRENT_TIMESTAMP
+                WHERE customer_phone = %s
+                  AND appointment_date >= %s
+                  AND status = 'confirmed'
+                  AND id = (
+                      SELECT id FROM salon_appointments
+                      WHERE customer_phone = %s
+                        AND appointment_date >= %s
+                        AND status = 'confirmed'
+                      ORDER BY appointment_date, appointment_time
+                      LIMIT 1
+                  )
+                RETURNING id, customer_name, service_type, appointment_date, appointment_time
+            """, (normalized_phone, today, normalized_phone, today))
 
         result = cur.fetchone()
         conn.commit()
@@ -1235,7 +1247,7 @@ def load_conversation_history_from_db(phone: str, limit: int = 5, business_id: i
         conn = get_db_connection()
         cur = conn.cursor()
 
-        if business_id:
+        if business_id is not None:
             # Multi-tenant: new conversations table with JSONB messages
             cur.execute(
                 """SELECT messages FROM conversations
@@ -1338,7 +1350,7 @@ def save_conversation_to_db(phone: str, name: str, message: str, response: str, 
         conn = get_db_connection()
         cur = conn.cursor()
 
-        if business_id:
+        if business_id is not None:
             # Multi-tenant: upsert into conversations table with JSONB messages
             new_messages = json.dumps([
                 {"role": "user", "content": message},
@@ -1423,6 +1435,31 @@ def validate_business_day_and_time(date_str: str, time_str: str = None) -> Dict[
     return {"valid": True}
 
 
+_LEGACY_WEEKDAY_SLOTS = [
+    "09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
+    "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
+    "15:00", "15:30", "16:00", "16:30", "17:00", "17:30",
+]
+
+
+def _get_slots_for_date(date_str: str, biz_context: dict = None, parsed_date=None) -> list:
+    """Generate all time slots for a date using business hours or legacy defaults."""
+    if biz_context:
+        dt = parsed_date or datetime.strptime(date_str, "%Y-%m-%d")
+        dow = dt.weekday()
+        day_hours = biz_context["hours"].get(dow, {})
+        if day_hours.get("is_open") and day_hours.get("open_time") and day_hours.get("close_time"):
+            return generate_available_slots(day_hours["open_time"], day_hours["close_time"])
+        return []
+    # Legacy Aura fallback
+    if parsed_date:
+        weekday = parsed_date.weekday()
+    else:
+        weekday = datetime.strptime(date_str, "%Y-%m-%d").weekday()
+    closing_hour = 17 if weekday == 5 else 18
+    return [f"{h:02d}:{m:02d}" for h in range(9, closing_hour) for m in (0, 30)]
+
+
 # ============================================================================
 # BOOKING FUNCTIONS (Called by AI)
 # ============================================================================
@@ -1487,7 +1524,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             cur = conn.cursor()
 
             # Check availability
-            if business_id:
+            if business_id is not None:
                 cur.execute(
                     """SELECT COUNT(*) FROM appointments
                        WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
@@ -1503,7 +1540,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
 
             if count > 0:
                 # Get available alternatives for the same date
-                if business_id:
+                if business_id is not None:
                     cur.execute(
                         """SELECT appointment_time FROM appointments
                            WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
@@ -1520,17 +1557,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                 booked_times = [str(row[0])[:5] for row in cur.fetchall()]
 
                 # Generate all available slots
-                if biz_context:
-                    dow = datetime.strptime(date, "%Y-%m-%d").weekday()
-                    day_hours = biz_context["hours"].get(dow, {})
-                    if day_hours.get("is_open") and day_hours.get("open_time") and day_hours.get("close_time"):
-                        all_slots = generate_available_slots(day_hours["open_time"], day_hours["close_time"])
-                    else:
-                        all_slots = []
-                else:
-                    all_slots = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
-                                "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
-                                "15:00", "15:30", "16:00", "16:30", "17:00"]
+                all_slots = _get_slots_for_date(date, biz_context)
                 available_slots = [t for t in all_slots if t not in booked_times]
 
                 # Sort by proximity to requested time (BUG-002 FIX)
@@ -1565,7 +1592,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             )
 
             # Create appointment with google_event_id
-            if business_id:
+            if business_id is not None:
                 cur.execute(
                     """INSERT INTO appointments
                        (business_id, customer_phone, customer_name, treatment_code, treatment_name,
@@ -1625,7 +1652,7 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
         conn = get_db_connection()
         try:
             cur = conn.cursor()
-            if business_id:
+            if business_id is not None:
                 cur.execute(
                     """SELECT COUNT(*) FROM appointments
                        WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
@@ -1649,7 +1676,7 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
 
             # If not available, suggest nearest alternatives (BUG-001/BUG-002 enhancement)
             if not available:
-                if business_id:
+                if business_id is not None:
                     cur.execute(
                         """SELECT appointment_time FROM appointments
                            WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'""",
@@ -1664,17 +1691,7 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
                 booked_times = set(str(row[0])[:5] for row in cur.fetchall())
 
                 # Generate all available slots
-                if biz_context:
-                    dow = datetime.strptime(date, "%Y-%m-%d").weekday()
-                    day_hours = biz_context["hours"].get(dow, {})
-                    if day_hours.get("is_open") and day_hours.get("open_time") and day_hours.get("close_time"):
-                        all_slots = generate_available_slots(day_hours["open_time"], day_hours["close_time"])
-                    else:
-                        all_slots = []
-                else:
-                    all_slots = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
-                                "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
-                                "15:00", "15:30", "16:00", "16:30", "17:00"]
+                all_slots = _get_slots_for_date(date, biz_context)
                 available_slots = [t for t in all_slots if t not in booked_times]
 
                 # Sort by proximity to requested time
@@ -1718,7 +1735,7 @@ def get_customer_appointments(customer_phone: str, business_id: int = None, biz_
         try:
             cur = conn.cursor()
             # Only get future appointments (today with future time, or future dates)
-            if business_id:
+            if business_id is not None:
                 cur.execute(
                     """SELECT id, customer_name, treatment_code, appointment_date, appointment_time,
                               price, status, google_event_id
@@ -1794,7 +1811,7 @@ def cancel_appointment(customer_phone: str, customer_name: str, date: str, time:
             cur = conn.cursor()
 
             # Find appointment by name + date + time (fuzzy match on name)
-            if business_id:
+            if business_id is not None:
                 cur.execute(
                     """SELECT id, google_event_id, customer_name, appointment_date, appointment_time
                        FROM appointments
@@ -1841,11 +1858,10 @@ def cancel_appointment(customer_phone: str, customer_name: str, date: str, time:
                 delete_calendar_event(google_event_id, business=business)
 
             # Cancel appointment
-            table = "appointments" if business_id else "salon_appointments"
-            cur.execute(
-                f"UPDATE {table} SET status = 'cancelled' WHERE id = %s",
-                (appointment_id,)
-            )
+            if business_id is not None:
+                cur.execute("UPDATE appointments SET status = 'cancelled' WHERE id = %s", (appointment_id,))
+            else:
+                cur.execute("UPDATE salon_appointments SET status = 'cancelled' WHERE id = %s", (appointment_id,))
             conn.commit()
 
             calendar_note = " (removed from calendar)" if google_event_id else ""
@@ -1897,7 +1913,7 @@ def modify_appointment(
             cur = conn.cursor()
 
             # Find the appointment by name + date + time (fuzzy match on name)
-            if business_id:
+            if business_id is not None:
                 cur.execute(
                     """SELECT id, customer_name, treatment_code, appointment_date, appointment_time, google_event_id
                        FROM appointments
@@ -1984,7 +2000,7 @@ def modify_appointment(
 
             # Check if new slot is available (only if date or time changed)
             if new_date or new_time:
-                if business_id:
+                if business_id is not None:
                     cur.execute(
                         """SELECT COUNT(*) FROM appointments
                            WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s
@@ -2007,7 +2023,7 @@ def modify_appointment(
                     }
 
             # Update the appointment
-            if business_id:
+            if business_id is not None:
                 cur.execute(
                     """UPDATE appointments
                        SET appointment_date = %s, appointment_time = %s, treatment_code = %s,
@@ -2115,7 +2131,7 @@ def get_available_slots(date: str, business_id: int = None, biz_context: dict = 
             cur = conn.cursor()
 
             # Get all booked times for this date
-            if business_id:
+            if business_id is not None:
                 cur.execute(
                     """SELECT appointment_time FROM appointments
                        WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'""",
@@ -2136,20 +2152,7 @@ def get_available_slots(date: str, business_id: int = None, biz_context: dict = 
             conn.close()
 
         # Generate all possible slots based on business hours
-        if biz_context:
-            dow = parsed_date.weekday()
-            day_hours = biz_context["hours"].get(dow, {})
-            if day_hours.get("is_open") and day_hours.get("open_time") and day_hours.get("close_time"):
-                all_slots = generate_available_slots(day_hours["open_time"], day_hours["close_time"])
-            else:
-                all_slots = []
-        else:
-            weekday = parsed_date.weekday()
-            closing_hour = 17 if weekday == 5 else 18  # Saturday: 17:00, others: 18:00
-            all_slots = []
-            for hour in range(9, closing_hour):
-                all_slots.append(f"{hour:02d}:00")
-                all_slots.append(f"{hour:02d}:30")
+        all_slots = _get_slots_for_date(date, biz_context, parsed_date=parsed_date)
 
         # Filter out booked slots
         available_slots = [slot for slot in all_slots if slot not in booked_times]
@@ -2404,9 +2407,9 @@ def execute_function(function_name: str, arguments: str, phone: str,
                      platform: str = "whatsapp",
                      business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """Execute a booking function"""
-    if business_id and not biz_context:
-        raise ValueError("business_id requires biz_context")
     try:
+        if business_id is not None and not biz_context:
+            raise ValueError("business_id requires biz_context")
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
 
         if function_name == "create_appointment":
@@ -2476,74 +2479,6 @@ def execute_function(function_name: str, arguments: str, phone: str,
 # ============================================================================
 
 conversation_history: Dict[str, List[Dict]] = {}
-
-def detect_language(text: str) -> str:
-    """
-    Detect language of a message. Returns 'en' for English, 'it' for Italian.
-    Uses keyword-based detection for reliability with word boundary matching.
-    """
-    import re
-    text_lower = text.lower().strip()
-
-    # Tokenize into words (preserving word boundaries)
-    words = set(re.findall(r'\b\w+\b', text_lower))
-
-    # Strong English indicators (common English words)
-    english_words = {
-        'hi', 'hello', 'hey', 'morning', 'afternoon', 'evening',
-        'thanks', 'thank', 'please', 'yes', 'okay',
-        'book', 'booking', 'appointment', 'haircut', 'cancel', 'reschedule',
-        'what', 'when', 'where', 'how', 'why', 'who', 'which',
-        'are', 'you', 'do', 'can', 'could', 'would', 'will', 'should',
-        'available', 'tomorrow', 'today', 'time', 'price', 'cost', 'much',
-        'services', 'service', 'open', 'close', 'hours', 'hour',
-        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
-        'want', 'need', 'like',
-        'the', 'is', 'was', 'were', 'be', 'been', 'have', 'has', 'had',
-        'this', 'that', 'these', 'those', 'my', 'your', 'our', 'their',
-        'for', 'at', 'any', 'slots', 'cut', 'hair', 'there',
-        'pm', 'am', 'and', 'or', 'but', 'with', 'from', 'to',
-    }
-
-    # Strong Italian indicators (common Italian words)
-    italian_words = {
-        'ciao', 'salve', 'buongiorno', 'buonasera', 'buonanotte',
-        'grazie', 'prego', 'favore', 'per', 'sì', 'si',
-        'prenotare', 'prenotazione', 'appuntamento', 'taglio', 'cancellare',
-        'cosa', 'quando', 'dove', 'come', 'perché', 'chi', 'quale',
-        'sei', 'siete', 'posso', 'puoi', 'potrebbe', 'vorrei',
-        'disponibile', 'domani', 'oggi', 'prezzo', 'costo', 'quanto',
-        'servizi', 'servizio', 'aperto', 'chiuso', 'orari', 'orario',
-        'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato', 'domenica',
-        'mattina', 'pomeriggio', 'sera',
-        # Pronouns and common verbs
-        'mi', 'ti', 'ci', 'vi', 'chiamo', 'chiamare', 'nome', 'scusa', 'scusi',
-        'perfetto', 'bene', 'benissimo', 'va', 'fatto', 'pronto', 'aspetto',
-        'conferma', 'confermo', 'annulla', 'modifica', 'sposta', 'cambia',
-        'ora', 'adesso', 'dopo', 'prima', 'subito', 'ancora', 'già',
-        'solo', 'anche', 'molto', 'poco', 'tanto', 'tutto', 'niente',
-        'voglio', 'bisogno',
-        'il', 'lo', 'gli', 'le', 'un', 'una', 'uno', 'della', 'del', 'dei',
-        'sono', 'era', 'erano', 'essere', 'stato', 'avere', 'hai', 'aveva',
-        'questo', 'questa', 'questi', 'queste', 'quello', 'quella',
-        'mio', 'mia', 'tuo', 'tua', 'nostro', 'nostra', 'loro',
-        'con', 'alle', 'dalle', 'alle',
-    }
-
-    # Note: 'la', 'no', 'ok', 'si', 'a', 'e', 'i', 'o' are too ambiguous - excluded
-    # 'no' and 'ok' appear in both languages
-
-    # Count matches using word boundaries
-    english_count = len(words & english_words)
-    italian_count = len(words & italian_words)
-
-    # Log for debugging
-    logger.debug(f"Language detection: '{text[:50]}' → EN:{english_count} IT:{italian_count}")
-
-    # Default to English if unclear (most international users expect English)
-    if italian_count > english_count:
-        return 'it'
-    return 'en'
 
 def get_ai_response(phone: str, message: str, platform: str = "whatsapp", business_id: int = None, biz_context: dict = None) -> str:
     """

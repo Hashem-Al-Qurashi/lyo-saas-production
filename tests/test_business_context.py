@@ -259,32 +259,6 @@ class TestBuildBookingTools:
         assert "escalate_to_human" in tool_names
 
 
-class TestAppointmentQueryBuilder:
-    """Appointment queries use multi-tenant appointments table."""
-
-    def test_create_insert_has_business_id(self):
-        """The INSERT query must include business_id."""
-        from business_context import build_create_appointment_query
-        query, params = build_create_appointment_query(
-            business_id=1, customer_phone="+39333", customer_name="Maria",
-            treatment_code="taglio_donna", treatment_name="Taglio Donna",
-            date="2026-03-10", time="10:00", duration=45, price=60.00,
-            operator_id=None, google_event_id=None, platform="whatsapp",
-        )
-        assert "business_id" in query
-        assert "appointments" in query  # NOT salon_appointments
-        assert "salon_appointments" not in query
-        assert params[0] == 1  # business_id is first param
-
-    def test_check_availability_filters_by_business(self):
-        from business_context import build_check_availability_query
-        query, params = build_check_availability_query(
-            business_id=1, date="2026-03-10", time="10:00",
-        )
-        assert "business_id = %s" in query
-        assert "appointments" in query
-
-
 class TestDynamicBusinessHours:
     """Business hours validation uses DB instead of hardcoded values."""
 

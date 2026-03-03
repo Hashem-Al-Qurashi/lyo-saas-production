@@ -269,39 +269,6 @@ def _build_date_calendar(tz, hours: dict, closures: list) -> str:
     return "\n".join(lines)
 
 
-def build_create_appointment_query(
-    business_id, customer_phone, customer_name,
-    treatment_code, treatment_name, date, time,
-    duration, price, operator_id=None, google_event_id=None,
-    platform="whatsapp",
-):
-    """Build INSERT query for multi-tenant appointments table."""
-    query = """INSERT INTO appointments
-        (business_id, customer_phone, customer_name,
-         treatment_code, treatment_name,
-         appointment_date, appointment_time,
-         duration_minutes, price, status,
-         operator_id, google_event_id, platform)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s, %s)
-        RETURNING id"""
-    params = (
-        business_id, customer_phone, customer_name,
-        treatment_code, treatment_name,
-        date, time, duration, price,
-        operator_id, google_event_id, platform,
-    )
-    return query, params
-
-
-def build_check_availability_query(business_id, date, time):
-    """Build availability check query for multi-tenant appointments table."""
-    query = """SELECT COUNT(*) FROM appointments
-               WHERE business_id = %s AND appointment_date = %s
-               AND appointment_time = %s AND status = 'confirmed'"""
-    params = (business_id, date, time)
-    return query, params
-
-
 def build_booking_tools(services: dict) -> list:
     """Build OpenAI function calling tools with dynamic service_type enum.
 
