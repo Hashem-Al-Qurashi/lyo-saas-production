@@ -204,8 +204,9 @@ async def process_buffered_messages(phone: str):
         # Log response preview
         logger.info(f"📤 Response: {response[:100]}...")
 
-        # Send response
-        await send_whatsapp_message(phone, response)
+        # Send response using per-business credentials
+        business = biz_context["business"] if biz_context else {}
+        await send_whatsapp_message(phone, response, business)
 
     except Exception as e:
         logger.error(f"❌ Error processing buffered messages for {phone}: {e}")
@@ -691,7 +692,7 @@ def normalize_phone(phone: str) -> str:
 # GOOGLE CALENDAR FUNCTIONS
 # ============================================================================
 
-def create_calendar_event(customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None) -> str:
+def create_calendar_event(customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None, business: dict = None) -> str:
     """
     Create a Google Calendar event for the appointment.
     Returns: event_id if successful, None if failed
@@ -727,7 +728,8 @@ def create_calendar_event(customer_name: str, service: Dict, date_str: str, time
             }
         }
 
-        result = service_obj.events().insert(calendarId=GOOGLE_CALENDAR_ID, body=event).execute()
+        calendar_id = (business or {}).get("google_calendar_id") or GOOGLE_CALENDAR_ID
+        result = service_obj.events().insert(calendarId=calendar_id, body=event).execute()
         event_id = result.get("id")
         logger.info(f"✅ Calendar event created: {event_id}")
         return event_id
@@ -737,7 +739,7 @@ def create_calendar_event(customer_name: str, service: Dict, date_str: str, time
         return None
 
 
-def update_calendar_event(event_id: str, customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None) -> bool:
+def update_calendar_event(event_id: str, customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None, business: dict = None) -> bool:
     """
     Update an existing Google Calendar event.
     Returns: True if successful, False if failed
@@ -769,7 +771,8 @@ def update_calendar_event(event_id: str, customer_name: str, service: Dict, date
             }
         }
 
-        service_obj.events().update(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id, body=event).execute()
+        calendar_id = (business or {}).get("google_calendar_id") or GOOGLE_CALENDAR_ID
+        service_obj.events().update(calendarId=calendar_id, eventId=event_id, body=event).execute()
         logger.info(f"✅ Calendar event updated: {event_id}")
         return True
 
@@ -778,7 +781,7 @@ def update_calendar_event(event_id: str, customer_name: str, service: Dict, date
         return False
 
 
-def delete_calendar_event(event_id: str) -> bool:
+def delete_calendar_event(event_id: str, business: dict = None) -> bool:
     """
     Delete a Google Calendar event.
     Returns: True if successful, False if failed
@@ -792,7 +795,8 @@ def delete_calendar_event(event_id: str) -> bool:
             logger.warning("⚠️ Google Calendar not available, skipping event deletion")
             return False
 
-        service_obj.events().delete(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id).execute()
+        calendar_id = (business or {}).get("google_calendar_id") or GOOGLE_CALENDAR_ID
+        service_obj.events().delete(calendarId=calendar_id, eventId=event_id).execute()
         logger.info(f"✅ Calendar event deleted: {event_id}")
         return True
 
@@ -2600,12 +2604,15 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp") -> str
 # WHATSAPP SERVICE
 # ============================================================================
 
-async def send_whatsapp_message(phone: str, message: str) -> bool:
-    """Send WhatsApp message"""
-    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    
+async def send_whatsapp_message(phone: str, message: str, business: dict = None) -> bool:
+    """Send WhatsApp message using per-business credentials."""
+    phone_number_id = (business or {}).get("whatsapp_phone_number_id") or WHATSAPP_PHONE_NUMBER_ID
+    access_token = (business or {}).get("meta_access_token") or WHATSAPP_ACCESS_TOKEN
+
+    url = f"https://graph.facebook.com/v18.0/{phone_number_id}/messages"
+
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
     
@@ -2630,12 +2637,15 @@ async def send_whatsapp_message(phone: str, message: str) -> bool:
         logger.error(f"❌ WhatsApp API error: {e}")
         return False
 
-async def mark_as_read(message_id: str) -> bool:
-    """Mark message as read"""
-    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    
+async def mark_as_read(message_id: str, business: dict = None) -> bool:
+    """Mark message as read using per-business credentials."""
+    phone_number_id = (business or {}).get("whatsapp_phone_number_id") or WHATSAPP_PHONE_NUMBER_ID
+    access_token = (business or {}).get("meta_access_token") or WHATSAPP_ACCESS_TOKEN
+
+    url = f"https://graph.facebook.com/v18.0/{phone_number_id}/messages"
+
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
     
@@ -3108,7 +3118,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
         biz_name = business.get("name", "Unknown") if business else "Unknown"
         logger.info(f"💬 [{biz_name}] Message from {phone} ({contact_name})")
 
-        await mark_as_read(message_id)
+        await mark_as_read(message_id, business)
 
         # Check if chat is blocked (complaint was filed)
         if phone in chat_blocked:
@@ -3128,7 +3138,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                     response = get_ai_response(phone, text)
                     save_conversation_to_db(phone, contact_name, text, response)
                     logger.info(f"📤 Response: {response[:100]}...")
-                    await send_whatsapp_message(phone, response)
+                    await send_whatsapp_message(phone, response, business)
 
         elif message_type == "interactive":
             interactive = message.get("interactive", {})
@@ -3140,7 +3150,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                 # Log conversation to database for analytics
                 save_conversation_to_db(phone, contact_name, text, response)
 
-                await send_whatsapp_message(phone, response)
+                await send_whatsapp_message(phone, response, business)
         
         else:
             # Non-text message (voice, sticker, image, etc.)
@@ -3158,7 +3168,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                     "Se puoi, scrivici qui il tuo messaggio. "
                     "Altrimenti ti risponderà presto un membro del nostro team."
                 )
-                await send_whatsapp_message(phone, response_msg)
+                await send_whatsapp_message(phone, response_msg, business)
 
             elif message_type == "image":
                 send_alert_email(
@@ -3166,7 +3176,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                     f"L'utente {contact_name} ({phone}) ha inviato un'immagine.\n\nRichiede attenzione manuale."
                 )
                 response_msg = "Abbiamo ricevuto la tua immagine. Ti risponderà presto un membro del nostro team. 😊"
-                await send_whatsapp_message(phone, response_msg)
+                await send_whatsapp_message(phone, response_msg, business)
 
             elif message_type == "video":
                 send_alert_email(
@@ -3174,7 +3184,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                     f"L'utente {contact_name} ({phone}) ha inviato un video.\n\nRichiede attenzione manuale."
                 )
                 response_msg = "Abbiamo ricevuto il tuo video. Ti risponderà presto un membro del nostro team. 😊"
-                await send_whatsapp_message(phone, response_msg)
+                await send_whatsapp_message(phone, response_msg, business)
 
             elif message_type == "document":
                 send_alert_email(
@@ -3182,7 +3192,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                     f"L'utente {contact_name} ({phone}) ha inviato un file/documento.\n\nRichiede attenzione manuale."
                 )
                 response_msg = "Ho ricevuto il tuo file. Ti risponderà presto un membro del nostro team. 😊"
-                await send_whatsapp_message(phone, response_msg)
+                await send_whatsapp_message(phone, response_msg, business)
 
             elif message_type == "contacts":
                 send_alert_email(
@@ -3190,7 +3200,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                     f"L'utente {contact_name} ({phone}) ha condiviso un contatto.\n\nRichiede attenzione manuale."
                 )
                 response_msg = "Ho ricevuto il tuo contatto. Ti risponderà presto un membro del nostro team. 😊"
-                await send_whatsapp_message(phone, response_msg)
+                await send_whatsapp_message(phone, response_msg, business)
 
             elif message_type == "sticker":
                 # Ignore stickers completely - no response, no email
@@ -3202,13 +3212,13 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                     f"L'utente {contact_name} ({phone}) ha condiviso una posizione.\n\nRichiede attenzione manuale."
                 )
                 response_msg = "Ho ricevuto la tua posizione. Ti risponderà presto un membro del nostro team. 😊"
-                await send_whatsapp_message(phone, response_msg)
+                await send_whatsapp_message(phone, response_msg, business)
 
             else:
                 # Unknown message type
                 logger.info(f"❓ Unknown message type: {message_type} from {phone}")
                 response_msg = "Posso rispondere solo a messaggi di testo. Come posso aiutarti? 💇‍♀️"
-                await send_whatsapp_message(phone, response_msg)
+                await send_whatsapp_message(phone, response_msg, business)
     
     except Exception as e:
         logger.error(f"Process message error: {e}")
