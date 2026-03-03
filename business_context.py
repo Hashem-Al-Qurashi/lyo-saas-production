@@ -422,3 +422,46 @@ def build_booking_tools(services: dict) -> list:
             },
         },
     ]
+
+
+def validate_day_and_time(date_str: str, time_str: str, hours: dict, closures: list) -> dict:
+    """Validate if a date/time is within business hours.
+
+    Replaces the hardcoded validate_business_day_and_time().
+    """
+    # Check closure dates
+    for c in closures:
+        if c["date"] == date_str:
+            return {"valid": False, "error": f"Closed: {c['reason']}", "error_code": "CLOSED_SPECIAL"}
+
+    # Check day of week
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    dow = dt.weekday()  # 0=Monday
+    day_hours = hours.get(dow)
+
+    if not day_hours or not day_hours["is_open"]:
+        return {"valid": False, "error": "Closed on this day", "error_code": "CLOSED_DAY"}
+
+    # Check time within range
+    open_t = day_hours["open_time"]
+    close_t = day_hours["close_time"]
+    if open_t and close_t:
+        if time_str < open_t or time_str >= close_t:
+            return {"valid": False, "error": f"Outside hours ({open_t}-{close_t})", "error_code": "OUTSIDE_HOURS"}
+
+    return {"valid": True}
+
+
+def generate_available_slots(open_time: str, close_time: str, interval_minutes: int = 30) -> list:
+    """Generate time slots from open to close at given interval."""
+    slots = []
+    h, m = map(int, open_time.split(":"))
+    close_h, close_m = map(int, close_time.split(":"))
+    close_total = close_h * 60 + close_m
+
+    current = h * 60 + m
+    while current < close_total:
+        slots.append(f"{current // 60:02d}:{current % 60:02d}")
+        current += interval_minutes
+
+    return slots

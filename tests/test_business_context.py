@@ -283,3 +283,44 @@ class TestAppointmentQueryBuilder:
         )
         assert "business_id = %s" in query
         assert "appointments" in query
+
+
+class TestDynamicBusinessHours:
+    """Business hours validation uses DB instead of hardcoded values."""
+
+    def test_validate_closed_day(self):
+        from business_context import validate_day_and_time
+        hours = {
+            0: {"is_open": False, "open_time": None, "close_time": None},  # Monday closed
+            1: {"is_open": True, "open_time": "09:00", "close_time": "19:00"},
+        }
+        # Monday March 9 2026
+        result = validate_day_and_time("2026-03-09", "10:00", hours, [])
+        assert result["valid"] is False
+        assert "CLOSED" in result["error_code"]
+
+    def test_validate_open_day(self):
+        from business_context import validate_day_and_time
+        hours = {
+            0: {"is_open": True, "open_time": "09:00", "close_time": "19:00"},
+        }
+        result = validate_day_and_time("2026-03-09", "10:00", hours, [])
+        assert result["valid"] is True
+
+    def test_validate_closure_date(self):
+        from business_context import validate_day_and_time
+        hours = {1: {"is_open": True, "open_time": "09:00", "close_time": "19:00"}}
+        closures = [{"date": "2026-03-10", "reason": "Holiday"}]
+        result = validate_day_and_time("2026-03-10", "10:00", hours, closures)
+        assert result["valid"] is False
+
+    def test_generate_available_slots(self):
+        from business_context import generate_available_slots
+        slots = generate_available_slots("09:00", "12:00", 30)
+        assert "09:00" in slots
+        assert "09:30" in slots
+        assert "10:00" in slots
+        assert "10:30" in slots
+        assert "11:00" in slots
+        assert "11:30" in slots
+        assert "12:00" not in slots  # close time excluded
