@@ -706,7 +706,7 @@ def normalize_phone(phone: str) -> str:
 # GOOGLE CALENDAR FUNCTIONS
 # ============================================================================
 
-def create_calendar_event(customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None, business: dict = None) -> str:
+def create_calendar_event(customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None, business: dict = None, operator_name: str = None) -> str:
     """
     Create a Google Calendar event for the appointment.
     Returns: event_id if successful, None if failed
@@ -722,9 +722,23 @@ def create_calendar_event(customer_name: str, service: Dict, date_str: str, time
         start_dt = ITALY_TZ.localize(dt)
         end_dt = start_dt + timedelta(minutes=service.get("duration", 60))
 
+        # Build summary and description with operator info
+        summary = f"{service.get('name_it', 'Appuntamento')} - {customer_name}"
+        if operator_name:
+            summary += f" (con {operator_name})"
+
+        description_lines = [
+            f"Cliente: {customer_name}",
+            f"Telefono: {customer_phone or 'N/A'}",
+            f"Servizio: {service.get('name_it')}",
+            f"Prezzo: €{service.get('price', 0)}",
+        ]
+        if operator_name:
+            description_lines.append(f"Stilista: {operator_name}")
+
         event = {
-            "summary": f"{service.get('name_it', 'Appuntamento')} - {customer_name}",
-            "description": f"Cliente: {customer_name}\nTelefono: {customer_phone or 'N/A'}\nServizio: {service.get('name_it')}\nPrezzo: €{service.get('price', 0)}",
+            "summary": summary,
+            "description": "\n".join(description_lines),
             "start": {
                 "dateTime": start_dt.isoformat(),
                 "timeZone": "Europe/Rome"
@@ -753,7 +767,7 @@ def create_calendar_event(customer_name: str, service: Dict, date_str: str, time
         return None
 
 
-def update_calendar_event(event_id: str, customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None, business: dict = None) -> bool:
+def update_calendar_event(event_id: str, customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None, business: dict = None, operator_name: str = None) -> bool:
     """
     Update an existing Google Calendar event.
     Returns: True if successful, False if failed
@@ -772,9 +786,22 @@ def update_calendar_event(event_id: str, customer_name: str, service: Dict, date
         start_dt = ITALY_TZ.localize(dt)
         end_dt = start_dt + timedelta(minutes=service.get("duration", 60))
 
+        summary = f"{service.get('name_it', 'Appuntamento')} - {customer_name}"
+        if operator_name:
+            summary += f" (con {operator_name})"
+
+        description_lines = [
+            f"Cliente: {customer_name}",
+            f"Telefono: {customer_phone or 'N/A'}",
+            f"Servizio: {service.get('name_it')}",
+            f"Prezzo: €{service.get('price', 0)}",
+        ]
+        if operator_name:
+            description_lines.append(f"Stilista: {operator_name}")
+
         event = {
-            "summary": f"{service.get('name_it', 'Appuntamento')} - {customer_name}",
-            "description": f"Cliente: {customer_name}\nTelefono: {customer_phone or 'N/A'}\nServizio: {service.get('name_it')}\nPrezzo: €{service.get('price', 0)}",
+            "summary": summary,
+            "description": "\n".join(description_lines),
             "start": {
                 "dateTime": start_dt.isoformat(),
                 "timeZone": "Europe/Rome"
@@ -1650,7 +1677,8 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                 date_str=date,
                 time_str=time,
                 customer_phone=normalized_phone,
-                business=business
+                business=business,
+                operator_name=resolved_operator_name
             )
 
             # Create appointment with google_event_id
