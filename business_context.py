@@ -180,6 +180,59 @@ def load_operators(business_id: int) -> list:
     return operators
 
 
+def resolve_operator(operator_name: str | None, service_code: str, operators: list) -> dict:
+    """Resolve operator display name to operator_id with validation.
+
+    Returns:
+        {"success": True, "operator_id": 1, "operator_name": "Giulia"}  -- specific match
+        {"success": True, "auto_assign": True, "eligible_operator_ids": [...]}  -- no preference
+        {"success": False, "error": "OPERATOR_SERVICE_MISMATCH", "alternatives": [...]}  -- wrong service
+        {"success": False, "error": "OPERATOR_NOT_FOUND"}  -- doesn't exist
+        {"success": True, "operator_id": None, "operator_name": None}  -- no operators configured
+    """
+    # No operators configured -- legacy behavior
+    if not operators:
+        return {"success": True, "operator_id": None, "operator_name": None}
+
+    # No preference -- auto-assign
+    if operator_name is None:
+        eligible = [
+            op["id"] for op in operators
+            if not op.get("treatments") or service_code in op.get("treatments", [])
+        ]
+        return {"success": True, "auto_assign": True, "eligible_operator_ids": eligible}
+
+    # Find operator by name (case-insensitive)
+    matched_op = None
+    for op in operators:
+        if op["display_name"].lower() == operator_name.lower():
+            matched_op = op
+            break
+
+    if not matched_op:
+        return {"success": False, "error": "OPERATOR_NOT_FOUND"}
+
+    # Check if operator offers this service
+    if matched_op.get("treatments") and service_code not in matched_op["treatments"]:
+        alternatives = [
+            op["display_name"] for op in operators
+            if not op.get("treatments") or service_code in op.get("treatments", [])
+        ]
+        return {
+            "success": False,
+            "error": "OPERATOR_SERVICE_MISMATCH",
+            "operator_name": matched_op["display_name"],
+            "service_code": service_code,
+            "alternatives": alternatives,
+        }
+
+    return {
+        "success": True,
+        "operator_id": matched_op["id"],
+        "operator_name": matched_op["display_name"],
+    }
+
+
 def extract_phone_number_id(value: dict) -> str | None:
     """Extract phone_number_id from Meta webhook payload value object."""
     return value.get("metadata", {}).get("phone_number_id")
@@ -234,6 +287,10 @@ def build_system_prompt(biz_context: dict) -> str:
     # Build date calendar (next 14 days)
     calendar_text = _build_date_calendar(tz, hours, closures)
 
+    # Build operators section
+    operators = biz_context.get("operators", [])
+    operators_text = _build_operators_section(operators)
+
     # Persona -- use bot_persona if available, otherwise generate default
     persona = biz.get("bot_persona") or f"You are {biz['bot_name']}, an employee at {biz['name']}."
 
@@ -264,7 +321,7 @@ SPECIAL CLOSURES:
 
 DATE CALENDAR (next 14 days):
 {calendar_text}
-
+{operators_text}
 BOOKING RULES:
    STEP 1: Customer says what they want -> suggest times (call get_available_slots)
    STEP 2: Customer picks a time -> confirm details -> ask "Confermi?"
@@ -288,6 +345,29 @@ RULES:
    - Never show internal service codes to customer
    - If year is not specified, use {current_year}
 """
+
+
+def _build_operators_section(operators: list) -> str:
+    """Build STYLISTS/OPERATORS section for the system prompt."""
+    if not operators:
+        return ""
+
+    if len(operators) == 1:
+        op = operators[0]
+        return (
+            f"\nSTYLISTS/OPERATORS:\n"
+            f"   All appointments are with {op['display_name']}.\n"
+            f"   Always pass operator_name=\"{op['display_name']}\" to booking tools.\n"
+        )
+
+    lines = ["\nSTYLISTS/OPERATORS:"]
+    for op in operators:
+        treatments = ", ".join(op.get("treatments", [])) if op.get("treatments") else "general"
+        lines.append(f"   - {op['display_name']}: {treatments}")
+    lines.append('   Ask the customer: "Hai una preferenza per lo/la stilista?"')
+    lines.append("   Pass operator_name to create_appointment, check_availability, get_available_slots.")
+    lines.append("   If no preference, pass operator_name=null for auto-assignment.\n")
+    return "\n".join(lines)
 
 
 def _build_date_calendar(tz, hours: dict, closures: list) -> str:
