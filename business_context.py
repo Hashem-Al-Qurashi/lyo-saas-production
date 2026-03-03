@@ -212,8 +212,8 @@ def resolve_operator(operator_name: str | None, service_code: str, operators: li
     if not matched_op:
         return {"success": False, "error": "OPERATOR_NOT_FOUND"}
 
-    # Check if operator offers this service
-    if matched_op.get("treatments") and service_code not in matched_op["treatments"]:
+    # Check if operator offers this service (skip if service_code is empty/None)
+    if service_code and matched_op.get("treatments") and service_code not in matched_op["treatments"]:
         alternatives = [
             op["display_name"] for op in operators
             if not op.get("treatments") or service_code in op.get("treatments", [])

@@ -1565,7 +1565,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             # Check availability
             if business_id is not None:
                 if op_result.get("auto_assign"):
-                    # Auto-assign: pick least-busy eligible operator
+                    # Auto-assign: pick least-busy eligible operator who is FREE at this time
                     eligible_ids = op_result["eligible_operator_ids"]
                     cur.execute(
                         """SELECT o.id, o.display_name FROM operators o
@@ -1575,32 +1575,23 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                                GROUP BY operator_id
                            ) a ON a.operator_id = o.id
                            WHERE o.id = ANY(%s)
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM appointments ap
+                                 WHERE ap.business_id = %s AND ap.operator_id = o.id
+                                   AND ap.appointment_date = %s AND ap.appointment_time = %s
+                                   AND ap.status = 'confirmed'
+                             )
                            ORDER BY COALESCE(a.cnt, 0), o.sort_order LIMIT 1""",
-                        (business_id, date, eligible_ids)
+                        (business_id, date, eligible_ids, business_id, date, time)
                     )
                     row = cur.fetchone()
                     if row:
                         resolved_operator_id = row[0]
                         resolved_operator_name = row[1]
-                    # else: no eligible operators found, resolved stays None
-
-                    # Now check if THIS operator already has a booking at this time
-                    if resolved_operator_id is not None:
-                        cur.execute(
-                            """SELECT COUNT(*) FROM appointments
-                               WHERE business_id = %s AND operator_id = %s
-                                     AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                            (business_id, resolved_operator_id, date, time)
-                        )
-                        count = cur.fetchone()[0]
+                        count = 0  # This operator is free at this time
                     else:
-                        # No eligible operator resolved (edge case)
-                        cur.execute(
-                            """SELECT COUNT(*) FROM appointments
-                               WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                            (business_id, date, time)
-                        )
-                        count = cur.fetchone()[0]
+                        # All eligible operators are booked at this time
+                        count = 1
 
                 elif resolved_operator_id is not None:
                     # Specific operator: check per-operator availability
@@ -2127,7 +2118,7 @@ def modify_appointment(
             # Resolve new operator if provided
             resolved_operator_id = None
             resolved_operator_name = None
-            if new_operator and biz_context:
+            if new_operator and new_operator.strip() and biz_context:
                 operators = biz_context.get("operators", [])
                 op_result = resolve_operator(new_operator, final_service, operators)
                 if not op_result["success"]:
@@ -2209,7 +2200,8 @@ def modify_appointment(
                     date_str=final_date,
                     time_str=final_time,
                     customer_phone=normalized_phone,
-                    business=business
+                    business=business,
+                    operator_name=resolved_operator_name
                 )
 
             calendar_note = " (calendar updated)" if google_event_id else ""

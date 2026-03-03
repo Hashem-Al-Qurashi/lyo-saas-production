@@ -202,6 +202,21 @@ class TestResolveOperator:
         assert result["operator_id"] == 1
         assert result["operator_name"] == "Giulia"
 
+    def test_resolve_empty_service_code_skips_treatment_check(self):
+        """Empty service_code should resolve operator without treatment validation.
+        Used by check_availability and get_available_slots which don't know the service."""
+        operators = _make_operators()
+        # Luca only does taglio_donna/uomo/piega, but "" should skip the check
+        result = resolve_operator("Luca", "", operators)
+        assert result["success"] is True
+        assert result["operator_id"] == 2
+
+    def test_resolve_none_service_code_skips_treatment_check(self):
+        operators = _make_operators()
+        result = resolve_operator("Luca", None, operators)
+        assert result["success"] is True
+        assert result["operator_id"] == 2
+
 
 # ===========================================================================
 # Task 4: operator_name in tool definitions
