@@ -659,3 +659,68 @@ class TestCalendarNavigation:
         cookies = _auth_cookie()
         resp = client.get("/manage/dashboard", cookies=cookies)
         assert 'Calendario' in resp.text
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp Embedded Signup Callback (Task 11)
+# ---------------------------------------------------------------------------
+
+class TestEmbeddedSignupCallback:
+    """POST /manage/api/whatsapp/callback saves phone_number_id to business."""
+
+    @patch("management.routes.onboarding.get_connection")
+    def test_saves_phone_number_id(self, mock_conn):
+        mock_cur = MagicMock()
+        mock_cur.rowcount = 1
+        mock_conn.return_value.__enter__ = lambda s: MagicMock(cursor=lambda: mock_cur)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        cookies = _auth_cookie()
+        get_resp = client.get("/manage/login", cookies=cookies)
+        all_cookies = dict(cookies)
+        if get_resp.cookies.get("session"):
+            all_cookies["session"] = get_resp.cookies.get("session")
+        get_resp2 = client.get("/manage/dashboard", cookies=all_cookies)
+        csrf_match = re.search(r'csrf-token" content="([^"]+)"', get_resp2.text)
+        csrf_token = csrf_match.group(1) if csrf_match else ""
+        if get_resp2.cookies.get("session"):
+            all_cookies["session"] = get_resp2.cookies.get("session")
+
+        resp = client.post(
+            "/manage/api/whatsapp/callback",
+            json={
+                "phone_number_id": "123456789",
+                "waba_id": "waba_999",
+                "access_token": "EAAtoken...",
+            },
+            cookies=all_cookies,
+            headers={"X-CSRF-Token": csrf_token, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "connected"
+
+    def test_unauthenticated_returns_401(self):
+        resp = client.post("/manage/api/whatsapp/callback", json={})
+        assert resp.status_code in (401, 403)
+
+
+class TestWhatsAppStatus:
+    """GET /manage/api/whatsapp/status returns connection status."""
+
+    @patch("management.routes.onboarding.get_connection")
+    def test_returns_connected_status(self, mock_conn):
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = ("123456789",)
+        mock_conn.return_value.__enter__ = lambda s: MagicMock(cursor=lambda: mock_cur)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        cookies = _auth_cookie()
+        resp = client.get("/manage/api/whatsapp/status", cookies=cookies)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["connected"] is True
+        assert data["phone_number_id"] == "123456789"
+
+    def test_unauthenticated_returns_401(self):
+        resp = client.get("/manage/api/whatsapp/status")
+        assert resp.status_code in (401, 403)
