@@ -39,6 +39,8 @@ from business_context import (
     load_business_hours,
     load_closures,
     extract_phone_number_id,
+    build_system_prompt,
+    build_booking_tools,
     BusinessNotFoundError,
 )
 
@@ -200,7 +202,7 @@ async def process_buffered_messages(phone: str):
         biz_id = business.get("id") if business else None
 
         # Process with AI
-        response = get_ai_response(phone, combined_text, business_id=biz_id)
+        response = get_ai_response(phone, combined_text, business_id=biz_id, biz_context=biz_context)
 
         # Log conversation (log combined message, not individual ones)
         save_conversation_to_db(phone, contact_name, combined_text, response, business_id=biz_id)
@@ -291,7 +293,7 @@ def get_calendar_service():
 BUSINESS_NAME = "Aura Hair Studio"
 BUSINESS_TYPE = "beauty_salon"
 
-# Salon Services
+# DEPRECATED: Legacy fallback for Aura. Multi-tenant uses load_services() from business_context.
 SALON_SERVICES = {
     "taglio_donna": {"name_it": "Taglio Donna", "name_en": "Women's Haircut", "price": 60, "duration": 45},
     "taglio_uomo": {"name_it": "Taglio Uomo", "name_en": "Men's Haircut", "price": 40, "duration": 45},
@@ -356,8 +358,16 @@ def generate_date_calendar():
 # REMOVED: DATE_CALENDAR, CURRENT_YEAR, CURRENT_DATE_DISPLAY
 # Now generated fresh per request via get_date_context()
 
-def get_system_prompt():
-    """Build system prompt with FRESH dates - called per request!"""
+def get_system_prompt(biz_context=None):
+    """Build system prompt — delegates to business_context module for multi-tenant."""
+    if biz_context:
+        return build_system_prompt(biz_context)
+    # Legacy fallback for Aura (remove after full migration)
+    return _legacy_system_prompt()
+
+
+def _legacy_system_prompt():
+    """DEPRECATED: Hardcoded Aura Hair Studio prompt. Remove after migration."""
     dates = get_date_context()
     return f"""You are Simone, an employee at Aura Hair Studio in Milan, Italy.
 
@@ -2027,6 +2037,7 @@ def get_available_slots(date: str) -> Dict[str, Any]:
 # Using strict mode for guaranteed schema compliance
 # ============================================================================
 
+# DEPRECATED: Legacy fallback for Aura. Multi-tenant uses build_booking_tools() from business_context.
 BOOKING_TOOLS = [
     {
         "type": "function",
@@ -2375,7 +2386,7 @@ def detect_language(text: str) -> str:
         return 'it'
     return 'en'
 
-def get_ai_response(phone: str, message: str, platform: str = "whatsapp", business_id: int = None) -> str:
+def get_ai_response(phone: str, message: str, platform: str = "whatsapp", business_id: int = None, biz_context: dict = None) -> str:
     """
     Get AI response with SDK version compatibility.
 
@@ -2394,9 +2405,12 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
         logger.info(f"🌐 AI-native language detection for message: '{message[:50]}...'")
 
         # Build messages - GPT-4o will detect language from conversation history
-        messages = [{"role": "system", "content": get_system_prompt()}]
+        messages = [{"role": "system", "content": get_system_prompt(biz_context)}]
         messages.extend(conversation_history[phone][-10:])  # Last 10 messages for context
         messages.append({"role": "user", "content": message})
+
+        # Use dynamic tools when biz_context is available, else legacy fallback
+        tools = build_booking_tools(biz_context["services"]) if biz_context else BOOKING_TOOLS
 
         # Call OpenAI with version-appropriate syntax
         if OPENAI_SDK_VERSION >= 1:
@@ -2404,7 +2418,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
             response = openai_client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
-                tools=BOOKING_TOOLS,
+                tools=tools,
                 tool_choice="auto",
                 temperature=0
             )
@@ -3226,7 +3240,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                     await handle_buffered_message(phone, text, contact_name, biz_context)
                 else:
                     # Original immediate processing (fallback)
-                    response = get_ai_response(phone, text, business_id=biz_id)
+                    response = get_ai_response(phone, text, business_id=biz_id, biz_context=biz_context)
                     save_conversation_to_db(phone, contact_name, text, response, business_id=biz_id)
                     logger.info(f"📤 Response: {response[:100]}...")
                     await send_whatsapp_message(phone, response, business)
@@ -3236,7 +3250,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
             text = interactive.get("button_reply", {}).get("title", "") or \
                    interactive.get("list_reply", {}).get("title", "")
             if text:
-                response = get_ai_response(phone, text, business_id=biz_id)
+                response = get_ai_response(phone, text, business_id=biz_id, biz_context=biz_context)
 
                 # Log conversation to database for analytics
                 save_conversation_to_db(phone, contact_name, text, response, business_id=biz_id)
