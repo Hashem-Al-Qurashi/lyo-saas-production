@@ -7,6 +7,7 @@ based on the WhatsApp phone_number_id from the webhook payload.
 import os
 import psycopg2
 from datetime import datetime, timedelta
+from typing import Optional
 import pytz
 
 DB_CONFIG = {
@@ -180,7 +181,7 @@ def load_operators(business_id: int) -> list:
     return operators
 
 
-def resolve_operator(operator_name: str | None, service_code: str, operators: list) -> dict:
+def resolve_operator(operator_name: Optional[str], service_code: str, operators: list) -> dict:
     """Resolve operator display name to operator_id with validation.
 
     Returns:
@@ -233,7 +234,7 @@ def resolve_operator(operator_name: str | None, service_code: str, operators: li
     }
 
 
-def extract_phone_number_id(value: dict) -> str | None:
+def extract_phone_number_id(value: dict) -> Optional[str]:
     """Extract phone_number_id from Meta webhook payload value object."""
     return value.get("metadata", {}).get("phone_number_id")
 
