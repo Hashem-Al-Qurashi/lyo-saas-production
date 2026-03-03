@@ -42,6 +42,8 @@ from business_context import (
     build_system_prompt,
     build_booking_tools,
     BusinessNotFoundError,
+    validate_day_and_time,
+    generate_available_slots,
 )
 
 # Configure logging
@@ -949,7 +951,7 @@ def mark_reminder_sent(appointment_id: int, business_id: int = None) -> bool:
         return False
 
 
-def mark_reminder_confirmed(phone: str) -> Dict:
+def mark_reminder_confirmed(phone: str, business_id: int = None) -> Dict:
     """Mark appointment as confirmed by customer - works for any future appointment"""
     try:
         conn = get_db_connection()
@@ -958,25 +960,32 @@ def mark_reminder_confirmed(phone: str) -> Dict:
         today = datetime.now(ITALY_TZ).strftime("%Y-%m-%d")
         normalized_phone = normalize_phone(phone)
 
+        table = "appointments" if business_id else "salon_appointments"
+        biz_filter = "AND business_id = %s" if business_id else ""
+        biz_params = (business_id,) if business_id else ()
+        service_col = "treatment_code" if business_id else "service_type"
+
         # Find the NEXT upcoming appointment from this phone (not just tomorrow)
         # This fixes BUG-006: allows confirmation for any future appointment
-        cur.execute("""
-            UPDATE salon_appointments
+        cur.execute(f"""
+            UPDATE {table}
             SET reminder_confirmed = TRUE,
                 reminder_confirmed_at = CURRENT_TIMESTAMP
             WHERE customer_phone = %s
               AND appointment_date >= %s
+              {biz_filter}
               AND status = 'confirmed'
               AND id = (
-                  SELECT id FROM salon_appointments
+                  SELECT id FROM {table}
                   WHERE customer_phone = %s
                     AND appointment_date >= %s
+                    {biz_filter}
                     AND status = 'confirmed'
                   ORDER BY appointment_date, appointment_time
                   LIMIT 1
               )
-            RETURNING id, customer_name, service_type, appointment_date, appointment_time
-        """, (normalized_phone, today, normalized_phone, today))
+            RETURNING id, customer_name, {service_col}, appointment_date, appointment_time
+        """, (normalized_phone, today) + biz_params + (normalized_phone, today) + biz_params)
 
         result = cur.fetchone()
         conn.commit()
@@ -1004,7 +1013,7 @@ def mark_reminder_confirmed(phone: str) -> Dict:
         return {"success": False, "reason": str(e)}
 
 
-def escalate_to_human(phone: str, reason: str) -> Dict:
+def escalate_to_human(phone: str, reason: str, biz_context: dict = None) -> Dict:
     """
     Escalate conversation to a real person (owner).
     - Blocks the chat so bot won't respond
@@ -1020,6 +1029,9 @@ def escalate_to_human(phone: str, reason: str) -> Dict:
         base_url = os.getenv("BOT_BASE_URL", "http://3.239.106.181:8000")
         unblock_link = f"{base_url}/sblocca_chat/{phone}"
 
+        biz_name = biz_context["business"].get("name", "Salon") if biz_context else "Aura Hair Studio"
+        owner_email_addr = biz_context["business"].get("owner_email") if biz_context else None
+
         # Send email to owner
         email_body = f"""⚠️ ATTENZIONE: Richiesta di intervento umano
 
@@ -1032,7 +1044,7 @@ La chat è stata bloccata automaticamente. Il bot non risponderà più a questo 
 {unblock_link}
 
 ---
-Aura Hair Studio - Sistema di notifica automatico
+{biz_name} - Sistema di notifica automatico
 """
         email_sent = send_alert_email("⚠️ Intervento umano richiesto", email_body)
 
@@ -1410,7 +1422,8 @@ def validate_business_day_and_time(date_str: str, time_str: str = None) -> Dict[
 # BOOKING FUNCTIONS (Called by AI)
 # ============================================================================
 
-def create_appointment(customer_phone: str, customer_name: str, service_type: str, date: str, time: str, platform: str = "whatsapp") -> Dict[str, Any]:
+def create_appointment(customer_phone: str, customer_name: str, service_type: str, date: str, time: str,
+                       platform: str = "whatsapp", business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """Create a salon appointment"""
     try:
         # Normalize phone
@@ -1422,14 +1435,25 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
         customer_name = customer_name.strip()
 
         # Validate service
-        service = SALON_SERVICES.get(service_type.lower())
-        if not service:
-            return {
-                "success": False,
-                "error": "INVALID_SERVICE",
-                "provided": service_type,
-                "valid_services": list(SALON_SERVICES.keys())
-            }
+        if biz_context:
+            services = biz_context["services"]
+            service = services.get(service_type.lower())
+            if not service:
+                return {
+                    "success": False,
+                    "error": "INVALID_SERVICE",
+                    "provided": service_type,
+                    "valid_services": list(services.keys())
+                }
+        else:
+            service = SALON_SERVICES.get(service_type.lower())
+            if not service:
+                return {
+                    "success": False,
+                    "error": "INVALID_SERVICE",
+                    "provided": service_type,
+                    "valid_services": list(SALON_SERVICES.keys())
+                }
 
         # Validate date and time together (check if in the past)
         try:
@@ -1440,7 +1464,10 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             return {"success": False, "error": "INVALID_DATE_TIME_FORMAT", "provided_date": date, "provided_time": time}
 
         # Validate business hours, closed days, and holidays
-        business_validation = validate_business_day_and_time(date, time)
+        if biz_context:
+            business_validation = validate_day_and_time(date, time, biz_context["hours"], biz_context["closures"])
+        else:
+            business_validation = validate_business_day_and_time(date, time)
         if not business_validation["valid"]:
             return {
                 "success": False,
@@ -1455,27 +1482,50 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             cur = conn.cursor()
 
             # Check availability
-            cur.execute(
-                """SELECT COUNT(*) FROM salon_appointments
-                   WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                (date, time)
-            )
+            if business_id:
+                cur.execute(
+                    """SELECT COUNT(*) FROM appointments
+                       WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                    (business_id, date, time)
+                )
+            else:
+                cur.execute(
+                    """SELECT COUNT(*) FROM salon_appointments
+                       WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                    (date, time)
+                )
             count = cur.fetchone()[0]
 
             if count > 0:
                 # Get available alternatives for the same date
-                cur.execute(
-                    """SELECT appointment_time FROM salon_appointments
-                       WHERE appointment_date = %s AND status = 'confirmed'
-                       ORDER BY appointment_time""",
-                    (date,)
-                )
+                if business_id:
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                           ORDER BY appointment_time""",
+                        (business_id, date)
+                    )
+                else:
+                    cur.execute(
+                        """SELECT appointment_time FROM salon_appointments
+                           WHERE appointment_date = %s AND status = 'confirmed'
+                           ORDER BY appointment_time""",
+                        (date,)
+                    )
                 booked_times = [str(row[0])[:5] for row in cur.fetchall()]
 
                 # Generate all available slots
-                all_slots = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
-                            "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
-                            "15:00", "15:30", "16:00", "16:30", "17:00"]
+                if biz_context:
+                    dow = datetime.strptime(date, "%Y-%m-%d").weekday()
+                    day_hours = biz_context["hours"].get(dow, {})
+                    if day_hours.get("is_open") and day_hours.get("open_time") and day_hours.get("close_time"):
+                        all_slots = generate_available_slots(day_hours["open_time"], day_hours["close_time"])
+                    else:
+                        all_slots = []
+                else:
+                    all_slots = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
+                                "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
+                                "15:00", "15:30", "16:00", "16:30", "17:00"]
                 available_slots = [t for t in all_slots if t not in booked_times]
 
                 # Sort by proximity to requested time (BUG-002 FIX)
@@ -1499,22 +1549,37 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                 }
 
             # Create Google Calendar event first
+            business = biz_context["business"] if biz_context else None
             google_event_id = create_calendar_event(
                 customer_name=customer_name,
                 service=service,
                 date_str=date,
                 time_str=time,
-                customer_phone=normalized_phone
+                customer_phone=normalized_phone,
+                business=business
             )
 
             # Create appointment with google_event_id
-            cur.execute(
-                """INSERT INTO salon_appointments
-                   (customer_phone, customer_name, service_type, appointment_date, appointment_time, duration_minutes, price, status, google_event_id, platform)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s)
-                   RETURNING id""",
-                (normalized_phone, customer_name, service_type, date, time, service["duration"], service["price"], google_event_id, platform)
-            )
+            if business_id:
+                cur.execute(
+                    """INSERT INTO appointments
+                       (business_id, customer_phone, customer_name, treatment_code, treatment_name,
+                        appointment_date, appointment_time, duration_minutes, price, status,
+                        google_event_id, platform)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s)
+                       RETURNING id""",
+                    (business_id, normalized_phone, customer_name, service_type,
+                     service.get("name_it", service_type), date, time,
+                     service["duration"], service["price"], google_event_id, platform)
+                )
+            else:
+                cur.execute(
+                    """INSERT INTO salon_appointments
+                       (customer_phone, customer_name, service_type, appointment_date, appointment_time, duration_minutes, price, status, google_event_id, platform)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s)
+                       RETURNING id""",
+                    (normalized_phone, customer_name, service_type, date, time, service["duration"], service["price"], google_event_id, platform)
+                )
 
             appointment_id = cur.fetchone()[0]
             conn.commit()
@@ -1549,17 +1614,24 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
         logger.error(f"❌ Create appointment error: {e}")
         return {"success": False, "error": "BOOKING_ERROR", "details": str(e)}
 
-def check_availability(date: str, time: str) -> Dict[str, Any]:
+def check_availability(date: str, time: str, business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """Check if a time slot is available. If not, suggest nearest alternatives."""
     try:
         conn = get_db_connection()
         try:
             cur = conn.cursor()
-            cur.execute(
-                """SELECT COUNT(*) FROM salon_appointments
-                   WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                (date, time)
-            )
+            if business_id:
+                cur.execute(
+                    """SELECT COUNT(*) FROM appointments
+                       WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                    (business_id, date, time)
+                )
+            else:
+                cur.execute(
+                    """SELECT COUNT(*) FROM salon_appointments
+                       WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                    (date, time)
+                )
             count = cur.fetchone()[0]
             available = count == 0
 
@@ -1572,17 +1644,32 @@ def check_availability(date: str, time: str) -> Dict[str, Any]:
 
             # If not available, suggest nearest alternatives (BUG-001/BUG-002 enhancement)
             if not available:
-                cur.execute(
-                    """SELECT appointment_time FROM salon_appointments
-                       WHERE appointment_date = %s AND status = 'confirmed'""",
-                    (date,)
-                )
+                if business_id:
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'""",
+                        (business_id, date)
+                    )
+                else:
+                    cur.execute(
+                        """SELECT appointment_time FROM salon_appointments
+                           WHERE appointment_date = %s AND status = 'confirmed'""",
+                        (date,)
+                    )
                 booked_times = set(str(row[0])[:5] for row in cur.fetchall())
 
                 # Generate all available slots
-                all_slots = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
-                            "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
-                            "15:00", "15:30", "16:00", "16:30", "17:00"]
+                if biz_context:
+                    dow = datetime.strptime(date, "%Y-%m-%d").weekday()
+                    day_hours = biz_context["hours"].get(dow, {})
+                    if day_hours.get("is_open") and day_hours.get("open_time") and day_hours.get("close_time"):
+                        all_slots = generate_available_slots(day_hours["open_time"], day_hours["close_time"])
+                    else:
+                        all_slots = []
+                else:
+                    all_slots = ["09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
+                                "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
+                                "15:00", "15:30", "16:00", "16:30", "17:00"]
                 available_slots = [t for t in all_slots if t not in booked_times]
 
                 # Sort by proximity to requested time
@@ -1611,7 +1698,7 @@ def format_time_12h(time_str: str) -> str:
     except:
         return str(time_str)[:5]
 
-def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
+def get_customer_appointments(customer_phone: str, business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """Get all FUTURE appointments for a customer (filters out past appointments)"""
     try:
         # Normalize phone
@@ -1620,23 +1707,37 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
         phone_display = f"***{normalized_phone[-4:]}" if len(normalized_phone) >= 4 else normalized_phone
         now = datetime.now()
         today = now.date()
+        current_time = now.strftime("%H:%M")
 
         conn = get_db_connection()
         try:
             cur = conn.cursor()
             # Only get future appointments (today with future time, or future dates)
-            cur.execute(
-                """SELECT id, customer_name, service_type, appointment_date, appointment_time, price, status, google_event_id
-                   FROM salon_appointments
-                   WHERE customer_phone = %s AND status = 'confirmed'
-                   AND (appointment_date > %s OR (appointment_date = %s AND appointment_time > %s))
-                   ORDER BY appointment_date, appointment_time""",
-                (normalized_phone, today, today, now.strftime("%H:%M"))
-            )
+            if business_id:
+                cur.execute(
+                    """SELECT id, customer_name, treatment_code, appointment_date, appointment_time,
+                              price, status, google_event_id
+                       FROM appointments
+                       WHERE business_id = %s AND customer_phone = %s AND status = 'confirmed'
+                       AND (appointment_date > %s OR (appointment_date = %s AND appointment_time > %s))
+                       ORDER BY appointment_date, appointment_time""",
+                    (business_id, normalized_phone, today, today, current_time)
+                )
+            else:
+                cur.execute(
+                    """SELECT id, customer_name, service_type, appointment_date, appointment_time, price, status, google_event_id
+                       FROM salon_appointments
+                       WHERE customer_phone = %s AND status = 'confirmed'
+                       AND (appointment_date > %s OR (appointment_date = %s AND appointment_time > %s))
+                       ORDER BY appointment_date, appointment_time""",
+                    (normalized_phone, today, today, current_time)
+                )
+
+            services = biz_context["services"] if biz_context else SALON_SERVICES
 
             appointments = []
             for idx, row in enumerate(cur.fetchall(), 1):
-                service = SALON_SERVICES.get(row[2], {})
+                service = services.get(row[2], {})
                 time_24h = str(row[4])[:5]  # HH:MM format for function calls
                 appointments.append({
                     "customer_name": row[1],  # Use this for cancel/modify
@@ -1671,7 +1772,8 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def cancel_appointment(customer_phone: str, customer_name: str, date: str, time: str) -> Dict[str, Any]:
+def cancel_appointment(customer_phone: str, customer_name: str, date: str, time: str,
+                       business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """Cancel an appointment by customer name, date, and time (no ID needed)"""
     try:
         # Normalize phone
@@ -1687,16 +1789,27 @@ def cancel_appointment(customer_phone: str, customer_name: str, date: str, time:
             cur = conn.cursor()
 
             # Find appointment by name + date + time (fuzzy match on name)
-            cur.execute(
-                """SELECT id, google_event_id, customer_name, appointment_date, appointment_time
-                   FROM salon_appointments
-                   WHERE customer_phone = %s
-                   AND LOWER(customer_name) LIKE %s
-                   AND appointment_date = %s
-                   AND appointment_time = %s
-                   AND status = 'confirmed'""",
-                (normalized_phone, f"%{customer_name.lower()}%", date, normalized_time)
-            )
+            if business_id:
+                cur.execute(
+                    """SELECT id, google_event_id, customer_name, appointment_date, appointment_time
+                       FROM appointments
+                       WHERE business_id = %s AND customer_phone = %s
+                       AND LOWER(customer_name) LIKE %s
+                       AND appointment_date = %s AND appointment_time = %s
+                       AND status = 'confirmed'""",
+                    (business_id, normalized_phone, f"%{customer_name.lower()}%", date, normalized_time)
+                )
+            else:
+                cur.execute(
+                    """SELECT id, google_event_id, customer_name, appointment_date, appointment_time
+                       FROM salon_appointments
+                       WHERE customer_phone = %s
+                       AND LOWER(customer_name) LIKE %s
+                       AND appointment_date = %s
+                       AND appointment_time = %s
+                       AND status = 'confirmed'""",
+                    (normalized_phone, f"%{customer_name.lower()}%", date, normalized_time)
+                )
 
             row = cur.fetchone()
             if not row:
@@ -1719,11 +1832,13 @@ def cancel_appointment(customer_phone: str, customer_name: str, date: str, time:
 
             # Delete from Google Calendar
             if google_event_id:
-                delete_calendar_event(google_event_id)
+                business = biz_context["business"] if biz_context else None
+                delete_calendar_event(google_event_id, business=business)
 
             # Cancel appointment
+            table = "appointments" if business_id else "salon_appointments"
             cur.execute(
-                "UPDATE salon_appointments SET status = 'cancelled' WHERE id = %s",
+                f"UPDATE {table} SET status = 'cancelled' WHERE id = %s",
                 (appointment_id,)
             )
             conn.commit()
@@ -1753,7 +1868,9 @@ def modify_appointment(
     current_time: str,
     new_date: str = None,
     new_time: str = None,
-    new_service: str = None
+    new_service: str = None,
+    business_id: int = None,
+    biz_context: dict = None
 ) -> Dict[str, Any]:
     """
     Modify an existing appointment by customer name, date, and time (no ID needed).
@@ -1768,21 +1885,34 @@ def modify_appointment(
         if current_time and len(current_time) == 4 and ':' not in current_time:
             normalized_current_time = f"{current_time[:2]}:{current_time[2:]}"
 
+        name_pattern = f"%{customer_name.lower()}%"
+
         conn = get_db_connection()
         try:
             cur = conn.cursor()
 
             # Find the appointment by name + date + time (fuzzy match on name)
-            cur.execute(
-                """SELECT id, customer_name, service_type, appointment_date, appointment_time, google_event_id
-                   FROM salon_appointments
-                   WHERE customer_phone = %s
-                   AND LOWER(customer_name) LIKE %s
-                   AND appointment_date = %s
-                   AND appointment_time = %s
-                   AND status = 'confirmed'""",
-                (normalized_phone, f"%{customer_name.lower()}%", current_date, normalized_current_time)
-            )
+            if business_id:
+                cur.execute(
+                    """SELECT id, customer_name, treatment_code, appointment_date, appointment_time, google_event_id
+                       FROM appointments
+                       WHERE business_id = %s AND customer_phone = %s
+                       AND LOWER(customer_name) LIKE %s
+                       AND appointment_date = %s AND appointment_time = %s
+                       AND status = 'confirmed'""",
+                    (business_id, normalized_phone, name_pattern, current_date, normalized_current_time)
+                )
+            else:
+                cur.execute(
+                    """SELECT id, customer_name, service_type, appointment_date, appointment_time, google_event_id
+                       FROM salon_appointments
+                       WHERE customer_phone = %s
+                       AND LOWER(customer_name) LIKE %s
+                       AND appointment_date = %s
+                       AND appointment_time = %s
+                       AND status = 'confirmed'""",
+                    (normalized_phone, name_pattern, current_date, normalized_current_time)
+                )
 
             appointment = cur.fetchone()
             if not appointment:
@@ -1811,18 +1941,19 @@ def modify_appointment(
             final_service = new_service.lower() if new_service else db_service
 
             # Validate new service ONLY if being changed
+            services = biz_context["services"] if biz_context else SALON_SERVICES
             if new_service:
-                service = SALON_SERVICES.get(final_service)
+                service = services.get(final_service)
                 if not service:
                     return {
                         "success": False,
                         "error": "INVALID_SERVICE",
                         "provided": final_service,
-                        "valid_services": list(SALON_SERVICES.keys())
+                        "valid_services": list(services.keys())
                     }
             else:
                 # Keep existing service - get it for duration/price or use defaults
-                service = SALON_SERVICES.get(final_service, {"duration": 45, "price": 35, "name_it": final_service})
+                service = services.get(final_service, {"duration": 45, "price": 35, "name_it": final_service})
 
             # Validate new date and time together (check if in the past)
             try:
@@ -1833,7 +1964,10 @@ def modify_appointment(
                 return {"success": False, "error": "INVALID_DATE_TIME_FORMAT", "provided_date": final_date, "provided_time": final_time}
 
             # Validate business hours, closed days, and holidays
-            business_validation = validate_business_day_and_time(final_date, final_time)
+            if biz_context:
+                business_validation = validate_day_and_time(final_date, final_time, biz_context["hours"], biz_context["closures"])
+            else:
+                business_validation = validate_business_day_and_time(final_date, final_time)
             if not business_validation["valid"]:
                 return {
                     "success": False,
@@ -1845,12 +1979,20 @@ def modify_appointment(
 
             # Check if new slot is available (only if date or time changed)
             if new_date or new_time:
-                cur.execute(
-                    """SELECT COUNT(*) FROM salon_appointments
-                       WHERE appointment_date = %s AND appointment_time = %s
-                       AND status = 'confirmed' AND id != %s""",
-                    (final_date, final_time, appointment_id)
-                )
+                if business_id:
+                    cur.execute(
+                        """SELECT COUNT(*) FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s
+                           AND status = 'confirmed' AND id != %s""",
+                        (business_id, final_date, final_time, appointment_id)
+                    )
+                else:
+                    cur.execute(
+                        """SELECT COUNT(*) FROM salon_appointments
+                           WHERE appointment_date = %s AND appointment_time = %s
+                           AND status = 'confirmed' AND id != %s""",
+                        (final_date, final_time, appointment_id)
+                    )
                 if cur.fetchone()[0] > 0:
                     return {
                         "success": False,
@@ -1860,25 +2002,36 @@ def modify_appointment(
                     }
 
             # Update the appointment
-            cur.execute(
-                """UPDATE salon_appointments
-                   SET appointment_date = %s, appointment_time = %s, service_type = %s,
-                       duration_minutes = %s, price = %s
-                   WHERE id = %s""",
-                (final_date, final_time, final_service, service["duration"], service["price"], appointment_id)
-            )
+            if business_id:
+                cur.execute(
+                    """UPDATE appointments
+                       SET appointment_date = %s, appointment_time = %s, treatment_code = %s,
+                           duration_minutes = %s, price = %s
+                       WHERE id = %s""",
+                    (final_date, final_time, final_service, service["duration"], service["price"], appointment_id)
+                )
+            else:
+                cur.execute(
+                    """UPDATE salon_appointments
+                       SET appointment_date = %s, appointment_time = %s, service_type = %s,
+                           duration_minutes = %s, price = %s
+                       WHERE id = %s""",
+                    (final_date, final_time, final_service, service["duration"], service["price"], appointment_id)
+                )
 
             conn.commit()
 
             # Update Google Calendar event
             if google_event_id:
+                business = biz_context["business"] if biz_context else None
                 update_calendar_event(
                     event_id=google_event_id,
                     customer_name=db_name,
                     service=service,
                     date_str=final_date,
                     time_str=final_time,
-                    customer_phone=normalized_phone
+                    customer_phone=normalized_phone,
+                    business=business
                 )
 
             calendar_note = " (calendar updated)" if google_event_id else ""
@@ -1917,12 +2070,13 @@ def modify_appointment(
         logger.error(f"❌ Modify appointment error: {e}")
         return {"success": False, "error": "MODIFICATION_ERROR", "details": str(e)}
 
-def get_available_slots(date: str) -> Dict[str, Any]:
+def get_available_slots(date: str, business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """
     Get available time slots for a specific date.
     Returns 30-minute slots during business hours that are not booked.
-    Business hours: Tue-Fri 9:00-18:00, Sat 9:00-17:00
-    Closed: Monday, Sunday, Dec 25, Jan 1
+    Business hours: Tue-Fri 9:00-18:00, Sat 9:00-17:00 (legacy)
+    Multi-tenant: uses biz_context hours
+    Closed: Monday, Sunday, Dec 25, Jan 1 (legacy)
     """
     try:
         # Validate date
@@ -1936,7 +2090,10 @@ def get_available_slots(date: str) -> Dict[str, Any]:
             return {"success": False, "error": "INVALID_DATE_FORMAT", "provided_date": date}
 
         # Check if it's a closed day (without time validation)
-        business_validation = validate_business_day_and_time(date, None)
+        if biz_context:
+            business_validation = validate_day_and_time(date, None, biz_context["hours"], biz_context["closures"])
+        else:
+            business_validation = validate_business_day_and_time(date, None)
         if not business_validation["valid"]:
             return {
                 "success": True,  # Success but no slots
@@ -1947,20 +2104,23 @@ def get_available_slots(date: str) -> Dict[str, Any]:
                 "reason": business_validation["error"]
             }
 
-        # Determine closing hour based on day
-        weekday = parsed_date.weekday()
-        closing_hour = 17 if weekday == 5 else 18  # Saturday: 17:00, others: 18:00
-
         conn = get_db_connection()
         try:
             cur = conn.cursor()
 
             # Get all booked times for this date
-            cur.execute(
-                """SELECT appointment_time FROM salon_appointments
-                   WHERE appointment_date = %s AND status = 'confirmed'""",
-                (date,)
-            )
+            if business_id:
+                cur.execute(
+                    """SELECT appointment_time FROM appointments
+                       WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'""",
+                    (business_id, date)
+                )
+            else:
+                cur.execute(
+                    """SELECT appointment_time FROM salon_appointments
+                       WHERE appointment_date = %s AND status = 'confirmed'""",
+                    (date,)
+                )
 
             booked_times = set()
             for row in cur.fetchall():
@@ -1970,10 +2130,20 @@ def get_available_slots(date: str) -> Dict[str, Any]:
             conn.close()
 
         # Generate all possible slots based on business hours
-        all_slots = []
-        for hour in range(9, closing_hour):
-            all_slots.append(f"{hour:02d}:00")
-            all_slots.append(f"{hour:02d}:30")
+        if biz_context:
+            dow = parsed_date.weekday()
+            day_hours = biz_context["hours"].get(dow, {})
+            if day_hours.get("is_open") and day_hours.get("open_time") and day_hours.get("close_time"):
+                all_slots = generate_available_slots(day_hours["open_time"], day_hours["close_time"])
+            else:
+                all_slots = []
+        else:
+            weekday = parsed_date.weekday()
+            closing_hour = 17 if weekday == 5 else 18  # Saturday: 17:00, others: 18:00
+            all_slots = []
+            for hour in range(9, closing_hour):
+                all_slots.append(f"{hour:02d}:00")
+                all_slots.append(f"{hour:02d}:30")
 
         # Filter out booked slots
         available_slots = [slot for slot in all_slots if slot not in booked_times]
@@ -2224,7 +2394,9 @@ BOOKING_FUNCTIONS = convert_tools_to_functions(BOOKING_TOOLS) if OPENAI_SDK_VERS
 # FUNCTION EXECUTION
 # ============================================================================
 
-def execute_function(function_name: str, arguments: str, phone: str, platform: str = "whatsapp") -> Dict[str, Any]:
+def execute_function(function_name: str, arguments: str, phone: str,
+                     platform: str = "whatsapp",
+                     business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """Execute a booking function"""
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
@@ -2236,24 +2408,30 @@ def execute_function(function_name: str, arguments: str, phone: str, platform: s
                 service_type=args["service_type"],
                 date=args["date"],
                 time=args["time"],
-                platform=platform
+                platform=platform,
+                business_id=business_id,
+                biz_context=biz_context
             )
-        
+
         elif function_name == "check_availability":
             return check_availability(
                 date=args["date"],
-                time=args["time"]
+                time=args["time"],
+                business_id=business_id,
+                biz_context=biz_context
             )
-        
+
         elif function_name == "get_customer_appointments":
-            return get_customer_appointments(customer_phone=phone)
-        
+            return get_customer_appointments(customer_phone=phone, business_id=business_id, biz_context=biz_context)
+
         elif function_name == "cancel_appointment":
             return cancel_appointment(
                 customer_phone=phone,
                 customer_name=args["customer_name"],
                 date=args["date"],
-                time=args["time"]
+                time=args["time"],
+                business_id=business_id,
+                biz_context=biz_context
             )
 
         elif function_name == "modify_appointment":
@@ -2264,17 +2442,19 @@ def execute_function(function_name: str, arguments: str, phone: str, platform: s
                 current_time=args["current_time"],
                 new_date=args.get("new_date"),
                 new_time=args.get("new_time"),
-                new_service=args.get("new_service")
+                new_service=args.get("new_service"),
+                business_id=business_id,
+                biz_context=biz_context
             )
 
         elif function_name == "get_available_slots":
-            return get_available_slots(date=args["date"])
+            return get_available_slots(date=args["date"], business_id=business_id, biz_context=biz_context)
 
         elif function_name == "confirm_reminder":
-            return mark_reminder_confirmed(phone)
+            return mark_reminder_confirmed(phone, business_id=business_id)
 
         elif function_name == "escalate_to_human":
-            return escalate_to_human(phone=phone, reason=args["reason"])
+            return escalate_to_human(phone=phone, reason=args["reason"], biz_context=biz_context)
 
         else:
             return {"success": False, "error": "UNKNOWN_FUNCTION", "function_name": function_name}
@@ -2436,7 +2616,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
                     logger.info(f"🔧 AI calling tool: {function_name}")
                     logger.info(f"   Args: {function_args}")
 
-                    function_result = execute_function(function_name, function_args, phone, platform)
+                    function_result = execute_function(function_name, function_args, phone, platform, business_id=business_id, biz_context=biz_context)
                     logger.info(f"   Result: {function_result}")
 
                     messages.append({
@@ -2455,7 +2635,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
 
                 messages.append(assistant_message)
 
-                function_result = execute_function(function_name, function_args, phone, platform)
+                function_result = execute_function(function_name, function_args, phone, platform, business_id=business_id, biz_context=biz_context)
                 logger.info(f"   Result: {function_result}")
 
                 messages.append({
@@ -2511,7 +2691,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
                         tool_call_id_2 = tool_call.id
 
                         logger.info(f"🔧 AI calling second tool: {func2_name}")
-                        func2_result = execute_function(func2_name, func2_args, phone, platform)
+                        func2_result = execute_function(func2_name, func2_args, phone, platform, business_id=business_id, biz_context=biz_context)
                         logger.info(f"   Result: {func2_result}")
 
                         messages.append({
@@ -2528,7 +2708,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
 
                     messages.append(second_message)
 
-                    func2_result = execute_function(func2_name, func2_args, phone, platform)
+                    func2_result = execute_function(func2_name, func2_args, phone, platform, business_id=business_id, biz_context=biz_context)
                     logger.info(f"   Result: {func2_result}")
 
                     messages.append({
@@ -2584,7 +2764,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
                             tool_call_id_3 = tool_call.id
 
                             logger.info(f"🔧 AI calling third tool: {func3_name}")
-                            func3_result = execute_function(func3_name, func3_args, phone, platform)
+                            func3_result = execute_function(func3_name, func3_args, phone, platform, business_id=business_id, biz_context=biz_context)
                             logger.info(f"   Result: {func3_result}")
 
                             messages.append({
@@ -2608,7 +2788,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
 
                         messages.append(third_message)
 
-                        func3_result = execute_function(func3_name, func3_args, phone, platform)
+                        func3_result = execute_function(func3_name, func3_args, phone, platform, business_id=business_id, biz_context=biz_context)
                         logger.info(f"   Result: {func3_result}")
 
                         messages.append({
