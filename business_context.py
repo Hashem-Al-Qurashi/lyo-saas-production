@@ -459,7 +459,7 @@ def validate_day_and_time(date_str: str, time_str: str, hours: dict, closures: l
     # Check time within range
     open_t = day_hours["open_time"]
     close_t = day_hours["close_time"]
-    if open_t and close_t:
+    if time_str and open_t and close_t:
         if time_str < open_t or time_str >= close_t:
             return {"valid": False, "error": f"Outside hours ({open_t}-{close_t})", "error_code": "OUTSIDE_HOURS"}
 

@@ -242,13 +242,15 @@ async def handle_buffered_message(phone: str, text: str, contact_name: str, biz_
     pending_timers[phone] = timer_task
     logger.info(f"⏱️ Started {MESSAGE_BATCH_DELAY_SECONDS}s timer for {phone}")
 
-def send_alert_email(subject: str, body: str) -> bool:
+def send_alert_email(subject: str, body: str, to_email: str = None, business_name: str = None) -> bool:
     """Send alert email to owner (for complaints, media messages, etc.)"""
     try:
+        recipient = to_email or OWNER_EMAIL
+        biz_label = business_name or "Aura Hair Studio"
         msg = MIMEMultipart()
         msg['From'] = EMAIL_SENDER
-        msg['To'] = OWNER_EMAIL
-        msg['Subject'] = f"[Aura Hair Studio] {subject}"
+        msg['To'] = recipient
+        msg['Subject'] = f"[{biz_label}] {subject}"
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
@@ -1046,7 +1048,10 @@ La chat è stata bloccata automaticamente. Il bot non risponderà più a questo 
 ---
 {biz_name} - Sistema di notifica automatico
 """
-        email_sent = send_alert_email("⚠️ Intervento umano richiesto", email_body)
+        email_sent = send_alert_email(
+            "⚠️ Intervento umano richiesto", email_body,
+            to_email=owner_email_addr, business_name=biz_name
+        )
 
         return {
             "success": True,
@@ -2006,9 +2011,10 @@ def modify_appointment(
                 cur.execute(
                     """UPDATE appointments
                        SET appointment_date = %s, appointment_time = %s, treatment_code = %s,
-                           duration_minutes = %s, price = %s
+                           treatment_name = %s, duration_minutes = %s, price = %s
                        WHERE id = %s""",
-                    (final_date, final_time, final_service, service["duration"], service["price"], appointment_id)
+                    (final_date, final_time, final_service, service.get("name_it", final_service),
+                     service["duration"], service["price"], appointment_id)
                 )
             else:
                 cur.execute(
@@ -2398,6 +2404,8 @@ def execute_function(function_name: str, arguments: str, phone: str,
                      platform: str = "whatsapp",
                      business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """Execute a booking function"""
+    if business_id and not biz_context:
+        raise ValueError("business_id requires biz_context")
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
 
