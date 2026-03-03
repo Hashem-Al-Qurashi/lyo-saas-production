@@ -38,6 +38,7 @@ from business_context import (
     load_services,
     load_business_hours,
     load_closures,
+    load_operators,
     extract_phone_number_id,
     build_system_prompt,
     build_booking_tools,
@@ -3241,12 +3242,14 @@ async def webhook(request: Request):
                 business_services = load_services(business["id"])
                 business_hours = load_business_hours(business["id"])
                 business_closures = load_closures(business["id"])
+                business_operators = load_operators(business["id"])
 
                 biz_context = {
                     "business": business,
                     "services": business_services,
                     "hours": business_hours,
                     "closures": business_closures,
+                    "operators": business_operators,
                 }
                 # --- END ROUTING ---
 

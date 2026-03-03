@@ -129,6 +129,57 @@ def load_closures(business_id: int) -> list:
     return [{"date": d, "reason": r} for d, r in rows]
 
 
+def load_operators(business_id: int) -> list:
+    """Load active operators with their treatment codes.
+
+    Returns:
+        [{"id": 1, "display_name": "Giulia", "is_active": True,
+          "treatments": ["taglio_donna", "balayage", ...]}, ...]
+    """
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        # 1. Get active operators
+        cur.execute(
+            """SELECT id, display_name, is_active
+               FROM operators
+               WHERE business_id = %s AND is_active = true
+               ORDER BY sort_order""",
+            (business_id,),
+        )
+        op_rows = cur.fetchall()
+        if not op_rows:
+            return []
+
+        operators = []
+        op_ids = []
+        for op_id, display_name, is_active in op_rows:
+            operators.append({
+                "id": op_id,
+                "display_name": display_name,
+                "is_active": is_active,
+                "treatments": [],
+            })
+            op_ids.append(op_id)
+
+        # 2. Get treatment codes for these operators
+        cur.execute(
+            """SELECT ot.operator_id, t.code
+               FROM operator_treatments ot
+               JOIN treatments t ON ot.treatment_id = t.id
+               WHERE ot.operator_id = ANY(%s)
+               ORDER BY t.sort_order""",
+            (op_ids,),
+        )
+
+        # Build lookup
+        op_map = {op["id"]: op for op in operators}
+        for op_id, code in cur.fetchall():
+            if op_id in op_map:
+                op_map[op_id]["treatments"].append(code)
+
+    return operators
+
+
 def extract_phone_number_id(value: dict) -> str | None:
     """Extract phone_number_id from Meta webhook payload value object."""
     return value.get("metadata", {}).get("phone_number_id")
