@@ -39,6 +39,7 @@ from business_context import (
     load_business_hours,
     load_closures,
     load_operators,
+    resolve_operator,
     extract_phone_number_id,
     build_system_prompt,
     build_booking_tools,
@@ -1466,7 +1467,8 @@ def _get_slots_for_date(date_str: str, biz_context: dict = None, parsed_date=Non
 # ============================================================================
 
 def create_appointment(customer_phone: str, customer_name: str, service_type: str, date: str, time: str,
-                       platform: str = "whatsapp", business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
+                       platform: str = "whatsapp", business_id: int = None, biz_context: dict = None,
+                       operator_name: str = None) -> Dict[str, Any]:
     """Create a salon appointment"""
     try:
         # Normalize phone
@@ -1520,24 +1522,83 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                 "time": time
             }
 
+        # Resolve operator (multi-tenant only)
+        operators = biz_context.get("operators", []) if biz_context else []
+        op_result = resolve_operator(operator_name, service_type, operators)
+        if not op_result["success"]:
+            return {"success": False, **op_result}
+
+        resolved_operator_id = op_result.get("operator_id")
+        resolved_operator_name = op_result.get("operator_name")
+
         conn = get_db_connection()
         try:
             cur = conn.cursor()
 
             # Check availability
             if business_id is not None:
-                cur.execute(
-                    """SELECT COUNT(*) FROM appointments
-                       WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                    (business_id, date, time)
-                )
+                if op_result.get("auto_assign"):
+                    # Auto-assign: pick least-busy eligible operator
+                    eligible_ids = op_result["eligible_operator_ids"]
+                    cur.execute(
+                        """SELECT o.id, o.display_name FROM operators o
+                           LEFT JOIN (
+                               SELECT operator_id, COUNT(*) cnt FROM appointments
+                               WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                               GROUP BY operator_id
+                           ) a ON a.operator_id = o.id
+                           WHERE o.id = ANY(%s)
+                           ORDER BY COALESCE(a.cnt, 0), o.sort_order LIMIT 1""",
+                        (business_id, date, eligible_ids)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        resolved_operator_id = row[0]
+                        resolved_operator_name = row[1]
+                    # else: no eligible operators found, resolved stays None
+
+                    # Now check if THIS operator already has a booking at this time
+                    if resolved_operator_id is not None:
+                        cur.execute(
+                            """SELECT COUNT(*) FROM appointments
+                               WHERE business_id = %s AND operator_id = %s
+                                     AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                            (business_id, resolved_operator_id, date, time)
+                        )
+                        count = cur.fetchone()[0]
+                    else:
+                        # No eligible operator resolved (edge case)
+                        cur.execute(
+                            """SELECT COUNT(*) FROM appointments
+                               WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                            (business_id, date, time)
+                        )
+                        count = cur.fetchone()[0]
+
+                elif resolved_operator_id is not None:
+                    # Specific operator: check per-operator availability
+                    cur.execute(
+                        """SELECT COUNT(*) FROM appointments
+                           WHERE business_id = %s AND operator_id = %s
+                                 AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                        (business_id, resolved_operator_id, date, time)
+                    )
+                    count = cur.fetchone()[0]
+                else:
+                    # No operators configured: legacy global check
+                    cur.execute(
+                        """SELECT COUNT(*) FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                        (business_id, date, time)
+                    )
+                    count = cur.fetchone()[0]
             else:
                 cur.execute(
                     """SELECT COUNT(*) FROM salon_appointments
                        WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
                     (date, time)
                 )
-            count = cur.fetchone()[0]
+                count = cur.fetchone()[0]
 
             if count > 0:
                 # Get available alternatives for the same date
@@ -1596,12 +1657,14 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             if business_id is not None:
                 cur.execute(
                     """INSERT INTO appointments
-                       (business_id, customer_phone, customer_name, treatment_code, treatment_name,
+                       (business_id, operator_id, operator_name, customer_phone, customer_name,
+                        treatment_code, treatment_name,
                         appointment_date, appointment_time, duration_minutes, price, status,
                         google_event_id, platform)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s)
                        RETURNING id""",
-                    (business_id, normalized_phone, customer_name, service_type,
+                    (business_id, resolved_operator_id, resolved_operator_name,
+                     normalized_phone, customer_name, service_type,
                      service.get("name_it", service_type), date, time,
                      service["duration"], service["price"], google_event_id, platform)
                 )
@@ -1620,7 +1683,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             calendar_note = " (synced to calendar)" if google_event_id else ""
             logger.info(f"✅ Appointment created: #{appointment_id} for {customer_name}{calendar_note}")
 
-            return {
+            result = {
                 "success": True,
                 "appointment_id": appointment_id,
                 "customer_name": customer_name,
@@ -1631,6 +1694,9 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                 "price": service['price'],
                 "calendar_synced": bool(google_event_id)
             }
+            if resolved_operator_name:
+                result["operator_name"] = resolved_operator_name
+            return result
         finally:
             conn.close()
 
@@ -1647,26 +1713,56 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
         logger.error(f"❌ Create appointment error: {e}")
         return {"success": False, "error": "BOOKING_ERROR", "details": str(e)}
 
-def check_availability(date: str, time: str, business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
+def check_availability(date: str, time: str, business_id: int = None, biz_context: dict = None,
+                       operator_name: str = None) -> Dict[str, Any]:
     """Check if a time slot is available. If not, suggest nearest alternatives."""
     try:
+        operators = biz_context.get("operators", []) if biz_context else []
+
         conn = get_db_connection()
         try:
             cur = conn.cursor()
             if business_id is not None:
-                cur.execute(
-                    """SELECT COUNT(*) FROM appointments
-                       WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                    (business_id, date, time)
-                )
+                if operator_name and operators:
+                    # Specific operator: check per-operator
+                    op_result = resolve_operator(operator_name, "", operators)
+                    if not op_result["success"]:
+                        return {"success": False, **op_result}
+                    op_id = op_result["operator_id"]
+                    cur.execute(
+                        """SELECT COUNT(*) FROM appointments
+                           WHERE business_id = %s AND operator_id = %s
+                                 AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                        (business_id, op_id, date, time)
+                    )
+                    count = cur.fetchone()[0]
+                    available = count == 0
+                elif operators and not operator_name:
+                    # No preference + operators exist: available if not ALL operators booked
+                    cur.execute(
+                        """SELECT COUNT(DISTINCT operator_id) FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                        (business_id, date, time)
+                    )
+                    booked_count = cur.fetchone()[0]
+                    available = booked_count < len(operators)
+                else:
+                    # No operators configured: legacy global check
+                    cur.execute(
+                        """SELECT COUNT(*) FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                        (business_id, date, time)
+                    )
+                    count = cur.fetchone()[0]
+                    available = count == 0
             else:
                 cur.execute(
                     """SELECT COUNT(*) FROM salon_appointments
                        WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
                     (date, time)
                 )
-            count = cur.fetchone()[0]
-            available = count == 0
+                count = cur.fetchone()[0]
+                available = count == 0
 
             result = {
                 "success": True,
@@ -2093,7 +2189,8 @@ def modify_appointment(
         logger.error(f"❌ Modify appointment error: {e}")
         return {"success": False, "error": "MODIFICATION_ERROR", "details": str(e)}
 
-def get_available_slots(date: str, business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
+def get_available_slots(date: str, business_id: int = None, biz_context: dict = None,
+                        operator_name: str = None) -> Dict[str, Any]:
     """
     Get available time slots for a specific date.
     Returns 30-minute slots during business hours that are not booked.
@@ -2102,6 +2199,8 @@ def get_available_slots(date: str, business_id: int = None, biz_context: dict = 
     Closed: Monday, Sunday, Dec 25, Jan 1 (legacy)
     """
     try:
+        operators = biz_context.get("operators", []) if biz_context else []
+
         # Validate date
         try:
             parsed_date = datetime.strptime(date, "%Y-%m-%d")
@@ -2133,22 +2232,54 @@ def get_available_slots(date: str, business_id: int = None, biz_context: dict = 
 
             # Get all booked times for this date
             if business_id is not None:
-                cur.execute(
-                    """SELECT appointment_time FROM appointments
-                       WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'""",
-                    (business_id, date)
-                )
+                if operator_name and operators:
+                    # Specific operator: only count slots booked for that operator
+                    op_result = resolve_operator(operator_name, "", operators)
+                    if not op_result["success"]:
+                        return {"success": False, **op_result}
+                    op_id = op_result["operator_id"]
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND operator_id = %s AND appointment_date = %s AND status = 'confirmed'""",
+                        (business_id, op_id, date)
+                    )
+                    booked_times = set()
+                    for row in cur.fetchall():
+                        booked_times.add(str(row[0])[:5])
+
+                elif operators and not operator_name:
+                    # No preference + operators exist: slot is "fully booked" only when ALL operators are booked
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                                 AND operator_id IS NOT NULL
+                           GROUP BY appointment_time
+                           HAVING COUNT(DISTINCT operator_id) >= %s""",
+                        (business_id, date, len(operators))
+                    )
+                    booked_times = set()
+                    for row in cur.fetchall():
+                        booked_times.add(str(row[0])[:5])
+
+                else:
+                    # No operators configured: legacy global query
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'""",
+                        (business_id, date)
+                    )
+                    booked_times = set()
+                    for row in cur.fetchall():
+                        booked_times.add(str(row[0])[:5])
             else:
                 cur.execute(
                     """SELECT appointment_time FROM salon_appointments
                        WHERE appointment_date = %s AND status = 'confirmed'""",
                     (date,)
                 )
-
-            booked_times = set()
-            for row in cur.fetchall():
-                # Store as HH:MM string
-                booked_times.add(str(row[0])[:5])
+                booked_times = set()
+                for row in cur.fetchall():
+                    booked_times.add(str(row[0])[:5])
         finally:
             conn.close()
 
@@ -2422,7 +2553,8 @@ def execute_function(function_name: str, arguments: str, phone: str,
                 time=args["time"],
                 platform=platform,
                 business_id=business_id,
-                biz_context=biz_context
+                biz_context=biz_context,
+                operator_name=args.get("operator_name")
             )
 
         elif function_name == "check_availability":
@@ -2430,7 +2562,8 @@ def execute_function(function_name: str, arguments: str, phone: str,
                 date=args["date"],
                 time=args["time"],
                 business_id=business_id,
-                biz_context=biz_context
+                biz_context=biz_context,
+                operator_name=args.get("operator_name")
             )
 
         elif function_name == "get_customer_appointments":
@@ -2460,7 +2593,8 @@ def execute_function(function_name: str, arguments: str, phone: str,
             )
 
         elif function_name == "get_available_slots":
-            return get_available_slots(date=args["date"], business_id=business_id, biz_context=biz_context)
+            return get_available_slots(date=args["date"], business_id=business_id, biz_context=biz_context,
+                                       operator_name=args.get("operator_name"))
 
         elif function_name == "confirm_reminder":
             return mark_reminder_confirmed(phone, business_id=business_id)
