@@ -195,17 +195,18 @@ async def process_buffered_messages(phone: str):
         logger.info(f"⏰ Timer fired for {phone}. Processing {len(messages)} buffered message(s)")
         logger.info(f"📝 Combined input: {combined_text[:100]}...")
 
+        # Extract business info for multi-tenant
+        business = biz_context["business"] if biz_context else {}
+        biz_id = business.get("id") if business else None
+
         # Process with AI
-        response = get_ai_response(phone, combined_text)
+        response = get_ai_response(phone, combined_text, business_id=biz_id)
 
         # Log conversation (log combined message, not individual ones)
-        save_conversation_to_db(phone, contact_name, combined_text, response)
+        save_conversation_to_db(phone, contact_name, combined_text, response, business_id=biz_id)
 
         # Log response preview
         logger.info(f"📤 Response: {response[:100]}...")
-
-        # Send response using per-business credentials
-        business = biz_context["business"] if biz_context else {}
         await send_whatsapp_message(phone, response, business)
 
     except Exception as e:
@@ -829,7 +830,7 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
         return False
 
 
-def get_tomorrow_appointments() -> List[Dict]:
+def get_tomorrow_appointments(business_id: int = None) -> List[Dict]:
     """Get all confirmed appointments for tomorrow"""
     try:
         conn = get_db_connection()
@@ -837,15 +838,28 @@ def get_tomorrow_appointments() -> List[Dict]:
 
         tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        cur.execute("""
-            SELECT id, customer_phone, customer_name, service_type,
-                   appointment_date, appointment_time, price
-            FROM salon_appointments
-            WHERE appointment_date = %s
-              AND status = 'confirmed'
-              AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
-            ORDER BY appointment_time
-        """, (tomorrow,))
+        if business_id:
+            # Multi-tenant: new appointments table
+            cur.execute("""
+                SELECT id, customer_phone, customer_name, treatment_code,
+                       appointment_date, appointment_time, price
+                FROM appointments
+                WHERE business_id = %s AND appointment_date = %s
+                  AND status = 'confirmed'
+                  AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
+                ORDER BY appointment_time
+            """, (business_id, tomorrow))
+        else:
+            # Legacy: old salon_appointments table
+            cur.execute("""
+                SELECT id, customer_phone, customer_name, service_type,
+                       appointment_date, appointment_time, price
+                FROM salon_appointments
+                WHERE appointment_date = %s
+                  AND status = 'confirmed'
+                  AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
+                ORDER BY appointment_time
+            """, (tomorrow,))
 
         appointments = []
         for row in cur.fetchall():
@@ -906,13 +920,14 @@ def get_unconfirmed_appointments() -> List[Dict]:
         return []
 
 
-def mark_reminder_sent(appointment_id: int) -> bool:
+def mark_reminder_sent(appointment_id: int, business_id: int = None) -> bool:
     """Mark that reminder was sent for an appointment"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("""
-            UPDATE salon_appointments
+        table = "appointments" if business_id else "salon_appointments"
+        cur.execute(f"""
+            UPDATE {table}
             SET reminder_sent_at = CURRENT_TIMESTAMP
             WHERE id = %s
         """, (appointment_id,))
@@ -1024,47 +1039,86 @@ Aura Hair Studio - Sistema di notifica automatico
 
 
 async def send_reminder_messages():
-    """Send reminder messages to all customers with tomorrow's appointments (runs at 10 AM)"""
+    """Send reminder messages for ALL businesses (runs at 10 AM)"""
     logger.info("🔔 Starting daily reminder job...")
 
-    appointments = get_tomorrow_appointments()
-    logger.info(f"📋 Found {len(appointments)} appointments for tomorrow")
+    # Get all active businesses with WhatsApp configured
+    businesses = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, name, whatsapp_phone_number_id, meta_access_token, timezone
+               FROM businesses WHERE status = 'active' AND whatsapp_phone_number_id IS NOT NULL"""
+        )
+        businesses = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Failed to load businesses for reminders: {e}")
 
-    for apt in appointments:
-        # Format time for message
-        time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
-
-        # Client-provided reminder message
-        reminder_message = f"""Buongiorno!😊
+    if not businesses:
+        # Legacy single-tenant fallback
+        appointments = get_tomorrow_appointments()
+        logger.info(f"📋 Found {len(appointments)} appointments for tomorrow (legacy)")
+        for apt in appointments:
+            time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
+            reminder_message = f"""Buongiorno!😊
 Ti ricordiamo che domani alle ore {time_str} hai un appuntamento con noi.
 Ti chiediamo gentilmente di confermare rispondendo a questo messaggio entro le 18:00 di oggi.
 
 In caso di mancata conferma, non possiamo garantire la disponibilità dell'appuntamento.
 
 Grazie!"""
+            phone = apt["phone"]
+            if not phone.startswith("+"):
+                phone = "+" + phone
+            success = await send_whatsapp_message(phone, reminder_message)
+            if success:
+                mark_reminder_sent(apt["id"])
+                save_conversation_to_db(
+                    phone=normalize_phone(phone), name=apt["name"],
+                    message="[SISTEMA: Promemoria appuntamento inviato automaticamente]",
+                    response=reminder_message
+                )
+                logger.info(f"✅ Reminder sent to {apt['name']} ({phone})")
+            else:
+                logger.error(f"❌ Failed to send reminder to {apt['name']} ({phone})")
+        logger.info(f"🔔 Reminder job completed (legacy). Sent {len(appointments)} reminders.")
+        return
 
-        # Send WhatsApp message
-        phone = apt["phone"]
-        if not phone.startswith("+"):
-            phone = "+" + phone
+    total_sent = 0
+    for biz_id, biz_name, wa_phone_id, wa_token, tz_name in businesses:
+        business = {"whatsapp_phone_number_id": wa_phone_id, "meta_access_token": wa_token, "name": biz_name}
+        appointments = get_tomorrow_appointments(business_id=biz_id)
+        logger.info(f"📋 [{biz_name}] Found {len(appointments)} appointments for tomorrow")
 
-        success = await send_whatsapp_message(phone, reminder_message)
+        for apt in appointments:
+            time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
+            reminder_message = f"""Buongiorno!😊
+Ti ricordiamo che domani alle ore {time_str} hai un appuntamento con noi.
+Ti chiediamo gentilmente di confermare rispondendo a questo messaggio entro le 18:00 di oggi.
 
-        if success:
-            mark_reminder_sent(apt["id"])
-            # BUG-007 FIX: Save reminder to conversation history
-            # This way, when user replies hours later, bot has context
-            save_conversation_to_db(
-                phone=normalize_phone(phone),
-                name=apt["name"],
-                message="[SISTEMA: Promemoria appuntamento inviato automaticamente]",
-                response=reminder_message
-            )
-            logger.info(f"✅ Reminder sent to {apt['name']} ({phone}) for {time_str}")
-        else:
-            logger.error(f"❌ Failed to send reminder to {apt['name']} ({phone})")
+In caso di mancata conferma, non possiamo garantire la disponibilità dell'appuntamento.
 
-    logger.info(f"🔔 Reminder job completed. Sent {len(appointments)} reminders.")
+Grazie!"""
+            phone = apt["phone"]
+            if not phone.startswith("+"):
+                phone = "+" + phone
+            success = await send_whatsapp_message(phone, reminder_message, business)
+            if success:
+                mark_reminder_sent(apt["id"], business_id=biz_id)
+                save_conversation_to_db(
+                    phone=normalize_phone(phone), name=apt["name"],
+                    message="[SISTEMA: Promemoria appuntamento inviato automaticamente]",
+                    response=reminder_message, business_id=biz_id
+                )
+                total_sent += 1
+                logger.info(f"✅ [{biz_name}] Reminder sent to {apt['name']} ({phone})")
+            else:
+                logger.error(f"❌ [{biz_name}] Failed to send reminder to {apt['name']} ({phone})")
+
+    logger.info(f"🔔 Reminder job completed. Sent {total_sent} reminders across {len(businesses)} businesses.")
 
 
 async def check_unconfirmed_and_notify():
@@ -1149,24 +1203,42 @@ def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 
-def load_conversation_history_from_db(phone: str, limit: int = 5) -> list:
-    """Load recent conversation history from database for context continuity (BUG-007 fix)."""
+def load_conversation_history_from_db(phone: str, limit: int = 5, business_id: int = None) -> list:
+    """Load recent conversation history from database for context continuity."""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT message, response FROM salon_conversations WHERE phone = %s ORDER BY timestamp DESC LIMIT %s", (phone, limit))
-        rows = cur.fetchall()
-        conn.close()
-        history = []
-        for row in reversed(rows):
-            user_msg, bot_response = row
-            if user_msg:
-                history.append({"role": "user", "content": user_msg})
-            if bot_response:
-                history.append({"role": "assistant", "content": bot_response})
-        if history:
-            logger.info(f"📚 Loaded {len(rows)} conversation(s) from DB for {phone}")
-        return history
+
+        if business_id:
+            # Multi-tenant: new conversations table with JSONB messages
+            cur.execute(
+                """SELECT messages FROM conversations
+                   WHERE business_id = %s AND customer_phone = %s""",
+                (business_id, phone),
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0] and isinstance(row[0], list):
+                return row[0][-(limit * 2):]  # Last N exchanges (user+assistant)
+            return []
+        else:
+            # Legacy: old salon_conversations table
+            cur.execute(
+                "SELECT message, response FROM salon_conversations WHERE phone = %s ORDER BY timestamp DESC LIMIT %s",
+                (phone, limit),
+            )
+            rows = cur.fetchall()
+            conn.close()
+            history = []
+            for row in reversed(rows):
+                user_msg, bot_response = row
+                if user_msg:
+                    history.append({"role": "user", "content": user_msg})
+                if bot_response:
+                    history.append({"role": "assistant", "content": bot_response})
+            if history:
+                logger.info(f"📚 Loaded {len(rows)} conversation(s) from DB for {phone}")
+            return history
     except Exception as e:
         logger.warning(f"⚠️ Failed to load conversation history from DB: {e}")
         return []
@@ -1231,7 +1303,7 @@ def initialize_database():
         logger.error(f"❌ Database init error: {e}")
         return False
 
-def save_conversation_to_db(phone: str, name: str, message: str, response: str, platform: str = "whatsapp"):
+def save_conversation_to_db(phone: str, name: str, message: str, response: str, platform: str = "whatsapp", business_id: int = None):
     """
     Save conversation to database for analytics and debugging.
     Wrapped in try/except so logging failure never breaks the bot.
@@ -1239,10 +1311,28 @@ def save_conversation_to_db(phone: str, name: str, message: str, response: str, 
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO salon_conversations (phone, name, message, response, platform, timestamp)
-            VALUES (%s, %s, %s, %s, %s, NOW())
-        """, (phone, name, message, response, platform))
+
+        if business_id:
+            # Multi-tenant: upsert into conversations table with JSONB messages
+            new_messages = json.dumps([
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response},
+            ])
+            cur.execute(
+                """INSERT INTO conversations (business_id, customer_phone, messages, updated_at)
+                   VALUES (%s, %s, %s::jsonb, NOW())
+                   ON CONFLICT (business_id, customer_phone) DO UPDATE
+                   SET messages = conversations.messages || %s::jsonb,
+                       updated_at = NOW()""",
+                (business_id, phone, new_messages, new_messages),
+            )
+        else:
+            # Legacy: insert into salon_conversations
+            cur.execute("""
+                INSERT INTO salon_conversations (phone, name, message, response, platform, timestamp)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+            """, (phone, name, message, response, platform))
+
         conn.commit()
         conn.close()
         logger.info(f"💾 Conversation logged for {phone} (platform={platform})")
@@ -2285,7 +2375,7 @@ def detect_language(text: str) -> str:
         return 'it'
     return 'en'
 
-def get_ai_response(phone: str, message: str, platform: str = "whatsapp") -> str:
+def get_ai_response(phone: str, message: str, platform: str = "whatsapp", business_id: int = None) -> str:
     """
     Get AI response with SDK version compatibility.
 
@@ -2298,7 +2388,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp") -> str
     try:
         # Get or create conversation history
         if phone not in conversation_history:
-            conversation_history[phone] = load_conversation_history_from_db(phone)
+            conversation_history[phone] = load_conversation_history_from_db(phone, business_id=business_id)
 
         # AI-native language detection: Let GPT-4o detect and maintain language from conversation context
         logger.info(f"🌐 AI-native language detection for message: '{message[:50]}...'")
@@ -3106,6 +3196,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
     """Process incoming message"""
     try:
         business = biz_context["business"] if biz_context else {}
+        biz_id = business.get("id") if business else None
 
         phone = message.get("from")
         message_id = message.get("id")
@@ -3135,8 +3226,8 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                     await handle_buffered_message(phone, text, contact_name, biz_context)
                 else:
                     # Original immediate processing (fallback)
-                    response = get_ai_response(phone, text)
-                    save_conversation_to_db(phone, contact_name, text, response)
+                    response = get_ai_response(phone, text, business_id=biz_id)
+                    save_conversation_to_db(phone, contact_name, text, response, business_id=biz_id)
                     logger.info(f"📤 Response: {response[:100]}...")
                     await send_whatsapp_message(phone, response, business)
 
@@ -3145,10 +3236,10 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
             text = interactive.get("button_reply", {}).get("title", "") or \
                    interactive.get("list_reply", {}).get("title", "")
             if text:
-                response = get_ai_response(phone, text)
+                response = get_ai_response(phone, text, business_id=biz_id)
 
                 # Log conversation to database for analytics
-                save_conversation_to_db(phone, contact_name, text, response)
+                save_conversation_to_db(phone, contact_name, text, response, business_id=biz_id)
 
                 await send_whatsapp_message(phone, response, business)
         
