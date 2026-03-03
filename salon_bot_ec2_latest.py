@@ -2498,7 +2498,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
                 second_response = openai_client.chat.completions.create(
                     model="gpt-4o",
                     messages=messages,
-                    tools=BOOKING_TOOLS,
+                    tools=tools,
                     tool_choice="auto",
                     temperature=0
                 )
@@ -2571,7 +2571,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
                     third_response = openai_client.chat.completions.create(
                         model="gpt-4o",
                         messages=messages,
-                        tools=BOOKING_TOOLS,
+                        tools=tools,
                         tool_choice="auto",
                         temperature=0
                     )

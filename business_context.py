@@ -315,6 +315,7 @@ def build_booking_tools(services: dict) -> list:
             "function": {
                 "name": "create_appointment",
                 "description": "Create a new appointment. ONLY call after customer explicitly confirms.",
+                "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -324,6 +325,7 @@ def build_booking_tools(services: dict) -> list:
                         "time": {"type": "string", "description": "Time HH:MM 24h"},
                     },
                     "required": ["customer_name", "service_type", "date", "time"],
+                    "additionalProperties": False,
                 },
             },
         },
@@ -332,6 +334,7 @@ def build_booking_tools(services: dict) -> list:
             "function": {
                 "name": "check_availability",
                 "description": "Check if a specific time slot is available",
+                "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -339,6 +342,7 @@ def build_booking_tools(services: dict) -> list:
                         "time": {"type": "string", "description": "Time HH:MM 24h"},
                     },
                     "required": ["date", "time"],
+                    "additionalProperties": False,
                 },
             },
         },
@@ -347,7 +351,8 @@ def build_booking_tools(services: dict) -> list:
             "function": {
                 "name": "get_customer_appointments",
                 "description": "Get all future appointments for current customer",
-                "parameters": {"type": "object", "properties": {}},
+                "strict": True,
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
             },
         },
         {
@@ -355,6 +360,7 @@ def build_booking_tools(services: dict) -> list:
             "function": {
                 "name": "cancel_appointment",
                 "description": "Cancel an appointment",
+                "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -363,6 +369,7 @@ def build_booking_tools(services: dict) -> list:
                         "time": {"type": "string", "description": "Time HH:MM 24h"},
                     },
                     "required": ["customer_name", "date", "time"],
+                    "additionalProperties": False,
                 },
             },
         },
@@ -371,17 +378,19 @@ def build_booking_tools(services: dict) -> list:
             "function": {
                 "name": "modify_appointment",
                 "description": "Modify an existing appointment",
+                "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "customer_name": {"type": "string"},
                         "current_date": {"type": "string"},
                         "current_time": {"type": "string"},
-                        "new_date": {"type": "string"},
-                        "new_time": {"type": "string"},
-                        "new_service": {"type": "string", "enum": service_codes},
+                        "new_date": {"type": ["string", "null"]},
+                        "new_time": {"type": ["string", "null"]},
+                        "new_service": {"type": ["string", "null"], "enum": service_codes + [None]},
                     },
-                    "required": ["customer_name", "current_date", "current_time"],
+                    "required": ["customer_name", "current_date", "current_time", "new_date", "new_time", "new_service"],
+                    "additionalProperties": False,
                 },
             },
         },
@@ -390,12 +399,14 @@ def build_booking_tools(services: dict) -> list:
             "function": {
                 "name": "get_available_slots",
                 "description": "Get all available time slots for a date",
+                "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "date": {"type": "string", "description": "Date YYYY-MM-DD"},
                     },
                     "required": ["date"],
+                    "additionalProperties": False,
                 },
             },
         },
@@ -404,7 +415,8 @@ def build_booking_tools(services: dict) -> list:
             "function": {
                 "name": "confirm_reminder",
                 "description": "Customer confirms tomorrow's appointment reminder",
-                "parameters": {"type": "object", "properties": {}},
+                "strict": True,
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
             },
         },
         {
@@ -412,12 +424,14 @@ def build_booking_tools(services: dict) -> list:
             "function": {
                 "name": "escalate_to_human",
                 "description": "Escalate to human when customer is frustrated/angry",
+                "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "reason": {"type": "string", "description": "Why escalating"},
                     },
                     "required": ["reason"],
+                    "additionalProperties": False,
                 },
             },
         },
