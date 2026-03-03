@@ -2505,7 +2505,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
         messages.append({"role": "user", "content": message})
 
         # Use dynamic tools when biz_context is available, else legacy fallback
-        tools = build_booking_tools(biz_context["services"]) if biz_context else BOOKING_TOOLS
+        tools = build_booking_tools(biz_context["services"], operators=biz_context.get("operators", [])) if biz_context else BOOKING_TOOLS
 
         # Call OpenAI with version-appropriate syntax
         if OPENAI_SDK_VERSION >= 1:

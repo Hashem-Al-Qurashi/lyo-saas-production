@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch, MagicMock, call
 
-from business_context import load_operators, resolve_operator, build_system_prompt
+from business_context import load_operators, resolve_operator, build_system_prompt, build_booking_tools
 
 
 # ---- Fixtures / helpers ----
@@ -201,3 +201,54 @@ class TestResolveOperator:
         assert result["success"] is True
         assert result["operator_id"] == 1
         assert result["operator_name"] == "Giulia"
+
+
+# ===========================================================================
+# Task 4: operator_name in tool definitions
+# ===========================================================================
+
+def _services():
+    return {"taglio_donna": {"name_it": "Taglio Donna", "name_en": "Haircut", "price": 60, "duration": 45}}
+
+
+class TestBookingToolsOperator:
+    """build_booking_tools adds operator_name when operators present."""
+
+    def test_create_appointment_has_operator_name_param(self):
+        tools = build_booking_tools(_services(), operators=_make_operators())
+        create = next(t for t in tools if t["function"]["name"] == "create_appointment")
+        props = create["function"]["parameters"]["properties"]
+        assert "operator_name" in props
+        assert None in props["operator_name"]["enum"]
+        assert "Giulia" in props["operator_name"]["enum"]
+        assert "operator_name" in create["function"]["parameters"]["required"]
+
+    def test_check_availability_has_operator_name_param(self):
+        tools = build_booking_tools(_services(), operators=_make_operators())
+        check = next(t for t in tools if t["function"]["name"] == "check_availability")
+        props = check["function"]["parameters"]["properties"]
+        assert "operator_name" in props
+
+    def test_get_available_slots_has_operator_name_param(self):
+        tools = build_booking_tools(_services(), operators=_make_operators())
+        slots = next(t for t in tools if t["function"]["name"] == "get_available_slots")
+        props = slots["function"]["parameters"]["properties"]
+        assert "operator_name" in props
+
+    def test_modify_appointment_has_new_operator_param(self):
+        tools = build_booking_tools(_services(), operators=_make_operators())
+        modify = next(t for t in tools if t["function"]["name"] == "modify_appointment")
+        props = modify["function"]["parameters"]["properties"]
+        assert "new_operator" in props
+        assert None in props["new_operator"]["enum"]
+        assert "new_operator" in modify["function"]["parameters"]["required"]
+
+    def test_no_operators_means_no_operator_name_param(self):
+        tools = build_booking_tools(_services(), operators=[])
+        create = next(t for t in tools if t["function"]["name"] == "create_appointment")
+        props = create["function"]["parameters"]["properties"]
+        assert "operator_name" not in props
+        check = next(t for t in tools if t["function"]["name"] == "check_availability")
+        assert "operator_name" not in check["function"]["parameters"]["properties"]
+        modify = next(t for t in tools if t["function"]["name"] == "modify_appointment")
+        assert "new_operator" not in modify["function"]["parameters"]["properties"]

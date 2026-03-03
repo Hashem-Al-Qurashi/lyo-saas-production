@@ -400,12 +400,80 @@ def _build_date_calendar(tz, hours: dict, closures: list) -> str:
     return "\n".join(lines)
 
 
-def build_booking_tools(services: dict) -> list:
+def _build_modify_params(service_codes: list, operator_names: list = None) -> dict:
+    """Build modify_appointment tool parameters."""
+    props = {
+        "customer_name": {"type": "string"},
+        "current_date": {"type": "string"},
+        "current_time": {"type": "string"},
+        "new_date": {"type": ["string", "null"]},
+        "new_time": {"type": ["string", "null"]},
+        "new_service": {"type": ["string", "null"], "enum": service_codes + [None]},
+    }
+    required = ["customer_name", "current_date", "current_time", "new_date", "new_time", "new_service"]
+    if operator_names:
+        props["new_operator"] = {
+            "type": ["string", "null"],
+            "enum": operator_names + [None],
+            "description": "New stylist name, or null to keep current",
+        }
+        required.append("new_operator")
+    return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
+
+
+def _build_get_slots_params(operator_names: list = None) -> dict:
+    """Build get_available_slots tool parameters."""
+    props = {"date": {"type": "string", "description": "Date YYYY-MM-DD"}}
+    required = ["date"]
+    if operator_names:
+        props["operator_name"] = {
+            "type": ["string", "null"],
+            "enum": operator_names + [None],
+            "description": "Stylist name, or null for any available",
+        }
+        required.append("operator_name")
+    return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
+
+
+def build_booking_tools(services: dict, operators: list = None) -> list:
     """Build OpenAI function calling tools with dynamic service_type enum.
 
     Returns the same BOOKING_TOOLS structure but with service codes from DB.
+    When operators is non-empty, adds operator_name param to booking tools.
     """
     service_codes = list(services.keys())
+    operator_names = [op["display_name"] for op in (operators or [])]
+    has_operators = bool(operator_names)
+
+    # Build create_appointment properties
+    create_props = {
+        "customer_name": {"type": "string", "description": "Customer's full name"},
+        "service_type": {"type": "string", "enum": service_codes, "description": "Service code"},
+        "date": {"type": "string", "description": "Date YYYY-MM-DD"},
+        "time": {"type": "string", "description": "Time HH:MM 24h"},
+    }
+    create_required = ["customer_name", "service_type", "date", "time"]
+    if has_operators:
+        create_props["operator_name"] = {
+            "type": ["string", "null"],
+            "enum": operator_names + [None],
+            "description": "Stylist name, or null for auto-assignment",
+        }
+        create_required.append("operator_name")
+
+    # Build check_availability properties
+    check_props = {
+        "date": {"type": "string", "description": "Date YYYY-MM-DD"},
+        "time": {"type": "string", "description": "Time HH:MM 24h"},
+    }
+    check_required = ["date", "time"]
+    if has_operators:
+        check_props["operator_name"] = {
+            "type": ["string", "null"],
+            "enum": operator_names + [None],
+            "description": "Stylist name, or null to check any",
+        }
+        check_required.append("operator_name")
 
     return [
         {
@@ -416,13 +484,8 @@ def build_booking_tools(services: dict) -> list:
                 "strict": True,
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "customer_name": {"type": "string", "description": "Customer's full name"},
-                        "service_type": {"type": "string", "enum": service_codes, "description": "Service code"},
-                        "date": {"type": "string", "description": "Date YYYY-MM-DD"},
-                        "time": {"type": "string", "description": "Time HH:MM 24h"},
-                    },
-                    "required": ["customer_name", "service_type", "date", "time"],
+                    "properties": create_props,
+                    "required": create_required,
                     "additionalProperties": False,
                 },
             },
@@ -435,11 +498,8 @@ def build_booking_tools(services: dict) -> list:
                 "strict": True,
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "date": {"type": "string", "description": "Date YYYY-MM-DD"},
-                        "time": {"type": "string", "description": "Time HH:MM 24h"},
-                    },
-                    "required": ["date", "time"],
+                    "properties": check_props,
+                    "required": check_required,
                     "additionalProperties": False,
                 },
             },
@@ -477,19 +537,7 @@ def build_booking_tools(services: dict) -> list:
                 "name": "modify_appointment",
                 "description": "Modify an existing appointment",
                 "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "customer_name": {"type": "string"},
-                        "current_date": {"type": "string"},
-                        "current_time": {"type": "string"},
-                        "new_date": {"type": ["string", "null"]},
-                        "new_time": {"type": ["string", "null"]},
-                        "new_service": {"type": ["string", "null"], "enum": service_codes + [None]},
-                    },
-                    "required": ["customer_name", "current_date", "current_time", "new_date", "new_time", "new_service"],
-                    "additionalProperties": False,
-                },
+                "parameters": _build_modify_params(service_codes, operator_names if has_operators else None),
             },
         },
         {
@@ -498,14 +546,7 @@ def build_booking_tools(services: dict) -> list:
                 "name": "get_available_slots",
                 "description": "Get all available time slots for a date",
                 "strict": True,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "date": {"type": "string", "description": "Date YYYY-MM-DD"},
-                    },
-                    "required": ["date"],
-                    "additionalProperties": False,
-                },
+                "parameters": _build_get_slots_params(operator_names if has_operators else None),
             },
         },
         {
