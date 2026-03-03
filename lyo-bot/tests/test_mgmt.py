@@ -2,7 +2,6 @@
 
 import re
 from unittest.mock import patch, MagicMock
-from contextlib import contextmanager
 from fastapi.testclient import TestClient
 
 from management.app import mgmt_app

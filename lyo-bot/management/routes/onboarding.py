@@ -29,8 +29,12 @@ async def whatsapp_callback(request: Request):
     waba_id = body.get("waba_id")
     access_token = body.get("access_token")
 
-    if not phone_number_id:
+    if not phone_number_id or not isinstance(phone_number_id, str):
         return JSONResponse({"error": "phone_number_id required"}, status_code=400)
+    if not waba_id or not isinstance(waba_id, str):
+        return JSONResponse({"error": "waba_id required"}, status_code=400)
+    if not access_token or not isinstance(access_token, str):
+        return JSONResponse({"error": "access_token required"}, status_code=400)
 
     with get_connection() as conn:
         cur = conn.cursor()

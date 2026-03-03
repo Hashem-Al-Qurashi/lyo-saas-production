@@ -129,7 +129,6 @@ user_platform: Dict[str, str] = {}
 # MESSAGE BATCHING (IMP-005)
 # Buffer messages for 30 seconds before processing to combine rapid messages
 # ============================================================================
-import asyncio
 
 # Buffer: phone -> list of {text, contact_name, timestamp}
 pending_messages: Dict[str, List[Dict]] = {}
@@ -1403,34 +1402,6 @@ def validate_business_day_and_time(date_str: str, time_str: str = None) -> Dict[
             "error": "We are closed on Sundays. We're open Tuesday-Saturday.",
             "error_code": "CLOSED_SUNDAY"
         }
-
-    # Business hours validation - COMMENTED OUT until client confirms hours
-    # if time_str:
-    #     try:
-    #         parsed_time = datetime.strptime(time_str, "%H:%M")
-    #         hour = parsed_time.hour
-    #         minute = parsed_time.minute
-    #     except ValueError:
-    #         return {"valid": False, "error": "Invalid time format", "error_code": "INVALID_TIME_FORMAT"}
-    #
-    #     # Saturday hours: 9:00-17:00
-    #     if weekday == 5:  # Saturday
-    #         if hour < 9 or (hour >= 17):
-    #             return {
-    #                 "valid": False,
-    #                 "error": f"On Saturdays we're open 9:00-17:00. {time_str} is outside our hours.",
-    #                 "error_it": f"Il sabato siamo aperti dalle 9:00 alle 17:00. {time_str} è fuori orario.",
-    #                 "error_code": "OUTSIDE_SATURDAY_HOURS"
-    #             }
-    #     else:
-    #         # Tuesday-Friday hours: 9:00-18:00
-    #         if hour < 9 or (hour >= 18):
-    #             return {
-    #                 "valid": False,
-    #                 "error": f"We're open 9:00-18:00 on {day_names[weekday]}. {time_str} is outside our hours.",
-    #                 "error_it": f"Siamo aperti dalle 9:00 alle 18:00 il {day_names_it[weekday]}. {time_str} è fuori orario.",
-    #                 "error_code": "OUTSIDE_BUSINESS_HOURS"
-    #             }
 
     return {"valid": True}
 
