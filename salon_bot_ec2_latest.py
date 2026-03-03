@@ -1988,7 +1988,8 @@ def modify_appointment(
     new_time: str = None,
     new_service: str = None,
     business_id: int = None,
-    biz_context: dict = None
+    biz_context: dict = None,
+    new_operator: str = None
 ) -> Dict[str, Any]:
     """
     Modify an existing appointment by customer name, date, and time (no ID needed).
@@ -2095,15 +2096,34 @@ def modify_appointment(
                     "time": final_time
                 }
 
+            # Resolve new operator if provided
+            resolved_operator_id = None
+            resolved_operator_name = None
+            if new_operator and biz_context:
+                operators = biz_context.get("operators", [])
+                op_result = resolve_operator(new_operator, final_service, operators)
+                if not op_result["success"]:
+                    return {"success": False, **op_result}
+                resolved_operator_id = op_result.get("operator_id")
+                resolved_operator_name = op_result.get("operator_name")
+
             # Check if new slot is available (only if date or time changed)
             if new_date or new_time:
                 if business_id is not None:
-                    cur.execute(
-                        """SELECT COUNT(*) FROM appointments
-                           WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s
-                           AND status = 'confirmed' AND id != %s""",
-                        (business_id, final_date, final_time, appointment_id)
-                    )
+                    if resolved_operator_id is not None:
+                        cur.execute(
+                            """SELECT COUNT(*) FROM appointments
+                               WHERE business_id = %s AND operator_id = %s AND appointment_date = %s AND appointment_time = %s
+                               AND status = 'confirmed' AND id != %s""",
+                            (business_id, resolved_operator_id, final_date, final_time, appointment_id)
+                        )
+                    else:
+                        cur.execute(
+                            """SELECT COUNT(*) FROM appointments
+                               WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s
+                               AND status = 'confirmed' AND id != %s""",
+                            (business_id, final_date, final_time, appointment_id)
+                        )
                 else:
                     cur.execute(
                         """SELECT COUNT(*) FROM salon_appointments
@@ -2121,14 +2141,25 @@ def modify_appointment(
 
             # Update the appointment
             if business_id is not None:
-                cur.execute(
-                    """UPDATE appointments
-                       SET appointment_date = %s, appointment_time = %s, treatment_code = %s,
-                           treatment_name = %s, duration_minutes = %s, price = %s
-                       WHERE id = %s""",
-                    (final_date, final_time, final_service, service.get("name_it", final_service),
-                     service["duration"], service["price"], appointment_id)
-                )
+                if resolved_operator_id is not None:
+                    cur.execute(
+                        """UPDATE appointments
+                           SET appointment_date = %s, appointment_time = %s, treatment_code = %s,
+                               treatment_name = %s, duration_minutes = %s, price = %s,
+                               operator_id = %s, operator_name = %s
+                           WHERE id = %s""",
+                        (final_date, final_time, final_service, service.get("name_it", final_service),
+                         service["duration"], service["price"], resolved_operator_id, resolved_operator_name, appointment_id)
+                    )
+                else:
+                    cur.execute(
+                        """UPDATE appointments
+                           SET appointment_date = %s, appointment_time = %s, treatment_code = %s,
+                               treatment_name = %s, duration_minutes = %s, price = %s
+                           WHERE id = %s""",
+                        (final_date, final_time, final_service, service.get("name_it", final_service),
+                         service["duration"], service["price"], appointment_id)
+                    )
             else:
                 cur.execute(
                     """UPDATE salon_appointments
@@ -2164,8 +2195,10 @@ def modify_appointment(
                 changes["time"] = {"from": db_time, "to": final_time}
             if new_service and new_service.lower() != db_service.lower():
                 changes["service"] = {"from": db_service, "to": final_service}
+            if resolved_operator_name:
+                changes["operator"] = {"to": resolved_operator_name}
 
-            return {
+            result = {
                 "success": True,
                 "customer_name": db_name,
                 "service": service['name_it'],
@@ -2175,6 +2208,9 @@ def modify_appointment(
                 "changes": changes,
                 "calendar_updated": bool(google_event_id)
             }
+            if resolved_operator_name:
+                result["operator_name"] = resolved_operator_name
+            return result
         finally:
             conn.close()
 
@@ -2589,7 +2625,8 @@ def execute_function(function_name: str, arguments: str, phone: str,
                 new_time=args.get("new_time"),
                 new_service=args.get("new_service"),
                 business_id=business_id,
-                biz_context=biz_context
+                biz_context=biz_context,
+                new_operator=args.get("new_operator")
             )
 
         elif function_name == "get_available_slots":
