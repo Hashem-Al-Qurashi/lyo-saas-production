@@ -3,7 +3,7 @@ import time
 from typing import Optional
 
 from app.models.database import get_connection
-from app.models.schemas import Business, Operator, Treatment, BusinessHours
+from app.models.schemas import Business, BusinessClosure, Operator, OperatorHours, Treatment, BusinessHours
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,12 @@ class TenantService:
 
     def invalidate(self, chatwoot_account_id: int) -> None:
         self._cache.pop(chatwoot_account_id, None)
+
+    def invalidate_by_business_id(self, business_id: int) -> None:
+        """Invalidate cache entry by businesses.id (PK), not chatwoot_account_id."""
+        to_remove = [k for k, (b, _) in self._cache.items() if b.id == business_id]
+        for k in to_remove:
+            del self._cache[k]
 
     def invalidate_all(self) -> None:
         self._cache.clear()
@@ -94,7 +100,8 @@ class TenantService:
                         """
                         SELECT id, business_id, code, name_it, name_en,
                                description_it, description_en,
-                               duration_minutes, price, is_active, sort_order, notes
+                               duration_minutes, price, is_active, sort_order, notes,
+                               auto_addon_id
                         FROM treatments
                         WHERE business_id = %s AND is_active = true
                         ORDER BY sort_order
@@ -110,6 +117,7 @@ class TenantService:
                             description_it=t[5], description_en=t[6],
                             duration_minutes=t[7], price=t[8],
                             is_active=t[9], sort_order=t[10], notes=t[11],
+                            auto_addon_id=t[12],
                         )
                         treatments.append(treat)
                         treatment_map[treat.id] = treat
@@ -173,9 +181,59 @@ class TenantService:
                             )
                         )
 
+                    # 6. Operator hours (per-day schedule)
+                    if operators:
+                        op_ids = [op.id for op in operators]
+                        cur.execute(
+                            """
+                            SELECT operator_id, day_of_week, is_working, start_time, end_time,
+                                   break_start, break_end
+                            FROM operator_hours
+                            WHERE operator_id = ANY(%s)
+                            ORDER BY operator_id, day_of_week
+                            """,
+                            (op_ids,),
+                        )
+                        for oh in cur.fetchall():
+                            op_id = oh[0]
+                            if op_id in operator_map:
+                                operator_map[op_id].hours.append(
+                                    OperatorHours(
+                                        operator_id=oh[0],
+                                        day_of_week=oh[1],
+                                        is_working=oh[2],
+                                        start_time=oh[3],
+                                        end_time=oh[4],
+                                        break_start=oh[5],
+                                        break_end=oh[6],
+                                    )
+                                )
+
+                    # 7. Business closures (current + future)
+                    cur.execute(
+                        """
+                        SELECT business_id, closure_date, closure_end_date, reason
+                        FROM business_closures
+                        WHERE business_id = %s
+                          AND COALESCE(closure_end_date, closure_date) >= CURRENT_DATE
+                        ORDER BY closure_date
+                        """,
+                        (bid,),
+                    )
+                    closures = [
+                        BusinessClosure(
+                            business_id=c[0],
+                            closure_date=c[1],
+                            closure_end_date=c[2],
+                            reason=c[3],
+                        )
+                        for c in cur.fetchall()
+                    ]
+
                     business.operators = operators
                     business.treatments = treatments
                     business.hours = hours
+                    business.closures = closures
 
                     logger.info(
                         "Loaded business '%s' (id=%s): %d operators, %d treatments, %d hour-rules",

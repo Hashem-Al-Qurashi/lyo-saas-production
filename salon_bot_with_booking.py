@@ -20,9 +20,7 @@ import httpx
 import openai
 
 # Google Calendar imports
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 # Email imports
@@ -33,6 +31,25 @@ from email.mime.multipart import MIMEMultipart
 # Scheduler imports
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+
+# Business context (multi-tenant)
+from business_context import (
+    lookup_treatment, lookup_business_policy, lookup_closure_dates,
+    lookup_faq, lookup_operator_for_treatment, get_available_treatments,
+    load_business_by_phone_number_id,
+    load_services,
+    load_business_hours,
+    load_closures,
+    load_operators,
+    load_faqs,
+    resolve_operator,
+    extract_phone_number_id,
+    build_system_prompt,
+    build_booking_tools,
+    BusinessNotFoundError,
+    validate_day_and_time,
+    generate_available_slots,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -74,8 +91,17 @@ else:
 
 # WhatsApp Configuration - MUST be set via environment variables
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "961636900357709")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "950083738197862")
 WHATSAPP_WEBHOOK_VERIFY_TOKEN = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "lyosaas2024")
+
+# Instagram Configuration
+INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
+INSTAGRAM_PAGE_ID = os.getenv("INSTAGRAM_PAGE_ID")
+INSTAGRAM_APP_SECRET = os.getenv("INSTAGRAM_APP_SECRET")
+INSTAGRAM_WEBHOOK_VERIFY_TOKEN = os.getenv("INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "lyosaas2024_ig")
+
+if not INSTAGRAM_ACCESS_TOKEN:
+    logger.warning("INSTAGRAM_ACCESS_TOKEN not set - Instagram messaging will not work")
 
 # Database Configuration - from environment variables
 DB_CONFIG = {
@@ -87,51 +113,182 @@ DB_CONFIG = {
     "sslmode": "require"
 }
 
-# Google Calendar Configuration
-GOOGLE_CREDS_DIR = Path(os.getenv("GOOGLE_CREDS_DIR", "/home/sakr_quraish/Projects/italian/lyo-saas-clean/google_creds"))
-GOOGLE_CREDENTIALS_FILE = GOOGLE_CREDS_DIR / "credentials.json"
-GOOGLE_TOKEN_FILE = GOOGLE_CREDS_DIR / "token.json"
+# Google Calendar Configuration (Service Account - permanent, never expires)
+GOOGLE_SERVICE_ACCOUNT_FILE = Path(os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "/home/ec2-user/google_creds/service_account_key.json"))
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 ITALY_TZ = pytz.timezone("Europe/Rome")
 
 # Email Configuration for Reminders
-EMAIL_SENDER = "notifiche.lyo@gmail.com"
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "cswm qipr andczt vorgz")
-OWNER_EMAIL = "notifiche.lyo@gmail.com"
+EMAIL_SENDER = os.getenv("EMAIL_ADDRESS", "notifiche.lyo@gmail.com")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+OWNER_EMAIL = os.getenv("EMAIL_TO", "notifiche.lyo@gmail.com")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
+
+# Chat blocking for complaints (phone -> blocked_reason)
+chat_blocked: Dict[str, str] = {}
+
+
+# ============================================================================
+# MESSAGE BATCHING (IMP-005)
+# Buffer messages for 30 seconds before processing to combine rapid messages
+# ============================================================================
+
+# Buffer: phone -> list of {text, contact_name, timestamp}
+pending_messages: Dict[str, List[Dict]] = {}
+
+# Active timers: phone -> asyncio.Task
+pending_timers: Dict[str, asyncio.Task] = {}
+
+# Batching config
+MESSAGE_BATCH_DELAY_SECONDS = 15
+MESSAGE_BATCHING_ENABLED = True  # Feature flag for testing
+
+def add_to_message_buffer(phone: str, text: str, contact_name: str):
+    """Add a message to the pending buffer for a user"""
+    if phone not in pending_messages:
+        pending_messages[phone] = []
+
+    pending_messages[phone].append({
+        "text": text,
+        "contact_name": contact_name,
+        "timestamp": datetime.now(ITALY_TZ).isoformat()
+    })
+    logger.info(f"📥 Buffered message for {phone}. Buffer size: {len(pending_messages[phone])}")
+
+def get_and_clear_buffer(phone: str) -> List[Dict]:
+    """Get all buffered messages for a user and clear the buffer"""
+    messages = pending_messages.pop(phone, [])
+    return messages
+
+def combine_buffered_messages(messages: List[Dict]) -> str:
+    """Combine multiple buffered messages into a single text"""
+    if len(messages) == 1:
+        return messages[0]["text"]
+
+    # Combine with newlines, preserving order
+    combined = "\n".join(msg["text"] for msg in messages)
+    logger.info(f"📦 Combined {len(messages)} messages into single input")
+    return combined
+
+async def process_buffered_messages(phone: str):
+    """Process all buffered messages for a user after timer expires"""
+    try:
+        # Get and clear buffer
+        messages = get_and_clear_buffer(phone)
+
+        # Remove timer reference
+        pending_timers.pop(phone, None)
+
+        if not messages:
+            logger.info(f"⚠️ No messages in buffer for {phone} when timer fired")
+            return
+
+        # Get business context from buffered messages
+        biz_context = None
+        for msg in messages:
+            if "biz_context" in msg:
+                biz_context = msg["biz_context"]
+                break
+
+        # Get contact name from first message
+        contact_name = messages[0].get("contact_name", "Cliente")
+
+        # Combine all messages
+        combined_text = combine_buffered_messages(messages)
+
+        logger.info(f"⏰ Timer fired for {phone}. Processing {len(messages)} buffered message(s)")
+        logger.info(f"📝 Combined input: {combined_text[:100]}...")
+
+        # Extract business info for multi-tenant
+        business = biz_context["business"] if biz_context else {}
+        biz_id = business.get("id") if business else None
+
+        # Process with AI
+        response = get_ai_response(phone, combined_text, business_id=biz_id, biz_context=biz_context)
+
+        # Log conversation (log combined message, not individual ones)
+        save_conversation_to_db(phone, contact_name, combined_text, response, business_id=biz_id)
+
+        # Log response preview
+        logger.info(f"📤 Response: {response[:100]}...")
+        await send_whatsapp_message(phone, response, business)
+
+    except Exception as e:
+        logger.error(f"❌ Error processing buffered messages for {phone}: {e}")
+        # Clear buffer on error to prevent stuck state
+        pending_messages.pop(phone, None)
+        pending_timers.pop(phone, None)
+
+async def handle_buffered_message(phone: str, text: str, contact_name: str, biz_context: dict = None):
+    """Handle incoming message with batching - buffer and start/reset timer"""
+    # Add to buffer
+    add_to_message_buffer(phone, text, contact_name)
+    # Store biz_context for when timer fires
+    if biz_context and phone in pending_messages:
+        pending_messages[phone][-1]["biz_context"] = biz_context
+
+    # Cancel existing timer if any
+    if phone in pending_timers:
+        old_timer = pending_timers[phone]
+        old_timer.cancel()
+        logger.info(f"🔄 Reset timer for {phone} (new message received)")
+
+    # Create new timer task
+    async def timer_callback():
+        await asyncio.sleep(MESSAGE_BATCH_DELAY_SECONDS)
+        await process_buffered_messages(phone)
+
+    # Start the timer
+    timer_task = asyncio.create_task(timer_callback())
+    pending_timers[phone] = timer_task
+    logger.info(f"⏱️ Started {MESSAGE_BATCH_DELAY_SECONDS}s timer for {phone}")
+
+def send_alert_email(subject: str, body: str, to_email: str = None, business_name: str = None) -> bool:
+    """Send alert email to owner (for complaints, media messages, etc.)"""
+    try:
+        recipient = to_email or OWNER_EMAIL
+        biz_label = business_name or "Aura Hair Studio"
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = recipient
+        msg['Subject'] = f"[{biz_label}] {subject}"
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+
+        logger.info(f"📧 Alert email sent: {subject}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to send alert email: {e}")
+        return False
 
 # Google Calendar Service (initialized lazily)
 _calendar_service = None
 
 def get_calendar_service():
-    """Get or initialize Google Calendar service"""
+    """Get or initialize Google Calendar service using Service Account (permanent key)"""
     global _calendar_service
 
     if _calendar_service is not None:
         return _calendar_service
 
     try:
-        creds = None
-
-        # Load existing token
-        if GOOGLE_TOKEN_FILE.exists():
-            creds = Credentials.from_authorized_user_file(str(GOOGLE_TOKEN_FILE), GOOGLE_SCOPES)
-
-        # Refresh or reauthorize if needed
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(GoogleRequest())
-            # Save refreshed token
-            with open(GOOGLE_TOKEN_FILE, 'w') as f:
-                f.write(creds.to_json())
-
-        if not creds or not creds.valid:
-            logger.warning("⚠️ Google Calendar credentials invalid or missing")
+        if not GOOGLE_SERVICE_ACCOUNT_FILE.exists():
+            logger.warning(f"⚠️ Service account key not found at {GOOGLE_SERVICE_ACCOUNT_FILE}")
             return None
 
+        creds = service_account.Credentials.from_service_account_file(
+            str(GOOGLE_SERVICE_ACCOUNT_FILE),
+            scopes=GOOGLE_SCOPES
+        )
+
         _calendar_service = build('calendar', 'v3', credentials=creds)
-        logger.info("✅ Google Calendar service initialized")
+        logger.info("✅ Google Calendar service initialized (service account)")
         return _calendar_service
 
     except Exception as e:
@@ -142,7 +299,7 @@ def get_calendar_service():
 BUSINESS_NAME = "Aura Hair Studio"
 BUSINESS_TYPE = "beauty_salon"
 
-# Salon Services
+# DEPRECATED: Legacy fallback for Aura. Multi-tenant uses load_services() from business_context.
 SALON_SERVICES = {
     "taglio_donna": {"name_it": "Taglio Donna", "name_en": "Women's Haircut", "price": 60, "duration": 45},
     "taglio_uomo": {"name_it": "Taglio Uomo", "name_en": "Men's Haircut", "price": 40, "duration": 45},
@@ -153,9 +310,23 @@ SALON_SERVICES = {
     "trattamento_cute": {"name_it": "Trattamento Cute", "name_en": "Scalp Treatment", "price": 40, "duration": 30}
 }
 
-# Get today's date for the prompt
-TODAY = datetime.now().strftime("%Y-%m-%d")
-TOMORROW = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+# Dynamic date function - called fresh each request (not frozen at startup!)
+def get_date_context():
+    """Get current date info - MUST be called fresh each request, not cached!"""
+    now = datetime.now(ITALY_TZ)
+    today = now.strftime("%Y-%m-%d")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    current_year = now.year
+    current_date_display = now.strftime("%A, %d %B %Y")
+    return {
+        "today": today,
+        "tomorrow": tomorrow,
+        "year": current_year,
+        "display": current_date_display,
+        "calendar": generate_date_calendar()
+    }
+
+# REMOVED frozen variables - use get_date_context() instead
 
 # Generate next 14 days calendar for the prompt
 def generate_date_calendar():
@@ -165,7 +336,7 @@ def generate_date_calendar():
                       "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
 
     calendar_lines = []
-    today = datetime.now()
+    today = datetime.now(ITALY_TZ)
 
     for i in range(14):
         day = today + timedelta(days=i)
@@ -190,37 +361,51 @@ def generate_date_calendar():
 
     return "\n".join(calendar_lines)
 
-DATE_CALENDAR = generate_date_calendar()
+# REMOVED: DATE_CALENDAR, CURRENT_YEAR, CURRENT_DATE_DISPLAY
+# Now generated fresh per request via get_date_context()
 
-# System prompt with booking capabilities
-SYSTEM_PROMPT = f"""You are Simone, an employee at Aura Hair Studio in Milan, Italy.
+def get_system_prompt(biz_context=None):
+    """Build system prompt — delegates to business_context module for multi-tenant."""
+    if biz_context:
+        return build_system_prompt(biz_context)
+    # Legacy fallback for Aura (remove after full migration)
+    return _legacy_system_prompt()
 
-══════════════════════════════════════════════════════════════
-🌐 LANGUAGE RULE - MANDATORY - FOLLOW THE LANGUAGE INSTRUCTION:
-══════════════════════════════════════════════════════════════
-   ⚠️ CRITICAL: You will receive a [RESPOND IN ENGLISH] or [RISPONDI IN ITALIANO]
-   instruction before each customer message. ALWAYS follow that instruction!
 
-   This instruction is based on the customer's CURRENT message, so:
-   - If instruction says ENGLISH → respond ONLY in English
-   - If instruction says ITALIANO → respond ONLY in Italian
+def _legacy_system_prompt():
+    """DEPRECATED: Hardcoded Aura Hair Studio prompt. Remove after migration."""
+    dates = get_date_context()
+    return f"""You are Simone, an employee at Aura Hair Studio in Milan, Italy.
 
-   DO NOT let previous conversation history influence your language!
-   The CURRENT instruction always takes priority!
+📆 TODAY'S DATE: {dates['display']} (Year: {dates['year']})
+   ⚠️ IMPORTANT: The current year is {dates['year']}. NEVER use any other year in your responses!
 
-   ❌ WRONG: Seeing Italian in history and responding Italian when instruction says ENGLISH
-   ❌ WRONG: Saying "La prenotazione è confermata!" when customer wrote in English
-   ✅ CORRECT: "Your booking is confirmed!" when instruction says ENGLISH
-   ✅ CORRECT: "La prenotazione è confermata!" when instruction says ITALIANO
+🌐 LANGUAGE RULE (CRITICAL) - ITALIAN FIRST:
+- DEFAULT LANGUAGE: ITALIAN. Always reply in Italian unless clearly English.
+- Only switch to English if customer writes a COMPLETE sentence in English
+- Single English words like "ok", "hi", "we", "no" → Still reply in Italian!
+- Short phrases like "book tomorrow" → Still reply in Italian!
+- Only switch to English for full sentences like "I would like to book an appointment"
+- NEVER switch languages mid-conversation, even after tool calls
+- Tool results are always in English - YOU translate to Italian for the customer
+- When in doubt → Use Italian (this is an Italian salon in Milan!)
 
-   EXAMPLES with instruction:
-   - [RESPOND IN ENGLISH] + "yes" → "Great! Your booking is confirmed for..."
-   - [RISPONDI IN ITALIANO] + "sì" → "Perfetto! La tua prenotazione è confermata per..."
-   - [RESPOND IN ENGLISH] + "3 pm" → "3 PM works! Would you like me to book that?"
-   - [RESPOND IN ENGLISH] + "1" → "1:00 PM it is! Booking confirmed."
+👋 "CIAO" CONTEXT RULE (BUG-005 FIX):
+   "Ciao" in Italian means BOTH hello AND goodbye. Use CONTEXT to decide:
 
-   ⚠️ NEVER switch languages mid-response! Use ONE language only!
-══════════════════════════════════════════════════════════════
+   TREAT AS GOODBYE (just acknowledge, don't restart conversation):
+   - If the previous message was a booking confirmation → "ciao" = goodbye
+   - If you just said "A presto!" / "Buona giornata!" → "ciao" = goodbye
+   - If customer just said "grazie" / "ok" / "perfetto" → "ciao" = goodbye
+   - Response: "Ciao! A presto!" or "Ciao, buona giornata!" (SHORT, no new questions)
+
+   TREAT AS HELLO (start/continue conversation):
+   - If it's the FIRST message in conversation → "ciao" = hello
+   - If "ciao" comes with a request: "ciao vorrei prenotare" → process request
+   - If conversation has been idle for a while → "ciao" = hello
+
+   ❌ WRONG: After booking confirmed, customer says "ciao" → "Ciao! Come posso aiutarti?"
+   ✅ CORRECT: After booking confirmed, customer says "ciao" → "Ciao! A presto!"
 
 🚫 IDENTITY RULE:
    - You are Simone, a HUMAN employee - NEVER reveal you are AI/bot
@@ -228,12 +413,13 @@ SYSTEM_PROMPT = f"""You are Simone, an employee at Aura Hair Studio in Milan, It
    - FORBIDDEN WORDS: artificial, virtual, chatbot, language model
    - Speak naturally as a real salon employee
 
-📅 CALENDARIO PROSSIMI GIORNI (IMPORTANTE - USA QUESTE DATE!):
-{DATE_CALENDAR}
+📅 UPCOMING DAYS CALENDAR (IMPORTANT - USE THESE DATES!):
+{dates['calendar']}
 
-   ⚠️ QUANDO IL CLIENTE DICE UN GIORNO (es. "martedì", "venerdì"):
-   → Guarda il calendario sopra e usa la DATA ESATTA (YYYY-MM-DD)
-   → NON inventare date! Usa SOLO le date nel calendario sopra!
+   ⚠️ WHEN CUSTOMER SAYS A DAY (e.g., "Tuesday", "Friday", "martedi", "venerdi"):
+   → Look at the calendar above and use the EXACT DATE (YYYY-MM-DD)
+   → For day names (Tuesday, Friday), use dates from the calendar above.
+   → For SPECIFIC dates ("25 febbraio", "March 15"), you CAN book any future date!
 
 📍 SALON INFO:
 - Name: Aura Hair Studio
@@ -242,18 +428,27 @@ SYSTEM_PROMPT = f"""You are Simone, an employee at Aura Hair Studio in Milan, It
 - Email: info@aurahairstudio.it
 - Style: Modern, minimal salon specializing in personalized cuts, color, and professional hair treatments
 
-💇 SERVICES (English / Italian):
-- Women's Haircut / Taglio Donna: €60 (45 min) - code: "taglio_donna"
-- Men's Haircut / Taglio Uomo: €40 (45 min) - code: "taglio_uomo"
-- Styling/Blow-dry / Piega: €30 (30 min) - code: "piega"
-- Basic Color / Colore Base: €70 (90 min) - code: "colore_base"
-- Balayage/Highlights / Balayage/Schiariture: €130 (2h 30min) - code: "balayage"
-- Restructuring Treatment / Trattamento Ristrutturante: €45 (45 min) - code: "trattamento_ristrutturante"
-- Scalp Treatment / Trattamento Cute: €40 (30 min) - code: "trattamento_cute"
+💇 SERVICES (Internal codes - NEVER show codes to customers!):
+- Taglio Donna / Women's Haircut: €60 (45 min) [internal: taglio_donna]
+- Taglio Uomo / Men's Haircut: €40 (45 min) [internal: taglio_uomo]
+- Piega / Styling/Blow-dry: €30 (30 min) [internal: piega]
+- Colore Base / Basic Color: €70 (90 min) [internal: colore_base]
+- Balayage/Schiariture / Highlights: €130 (2h 30min) [internal: balayage]
+- Trattamento Ristrutturante / Restructuring Treatment: €45 (45 min) [internal: trattamento_ristrutturante]
+- Trattamento Cute / Scalp Treatment: €40 (30 min) [internal: trattamento_cute]
 
-⚠️ If customer asks for a service we DON'T offer (perm, extensions, keratin, etc.):
-   → Say "We don't offer [service], but we have: Taglio Donna, Taglio Uomo, Piega, Colore Base, Balayage, Trattamento Ristrutturante, Trattamento Cute"
-   → Always list the actual service names!
+⚠️ NEVER show internal codes (taglio_donna, colore_base, etc.) to customers!
+   ❌ WRONG: "Taglio Donna - codice: taglio_donna"
+   ✅ CORRECT: "Taglio Donna - €60"
+
+⚠️ CRITICAL - ONLY OFFER SERVICES LISTED ABOVE. NOTHING ELSE EXISTS:
+   DO NOT invent, imagine, or make up ANY service not listed above.
+   If customer asks for a service NOT in the list (e.g., perm, extensions, keratin, thai massage):
+   -> Say "Mi dispiace, non offriamo questo servizio" / "Sorry, we don't offer that"
+   -> Then list ONLY the services shown above
+   -> NEVER say "yes we offer that" for something not in the list
+   -> NEVER invent prices or durations for non-existent services
+   -> Use internal codes ONLY when calling functions, never in messages to customer
 
 🕐 BUSINESS HOURS:
 ══════════════════════════════════════════════════════════════
@@ -281,40 +476,116 @@ SYSTEM_PROMPT = f"""You are Simone, an employee at Aura Hair Studio in Milan, It
 
 BOOKING FLOW:
 1. COLLECT INFO (only for NEW bookings):
-   - Customer name
+   - Customer name ⚠️ MANDATORY - see rule below
    - Desired service (taglio_donna, taglio_uomo, piega, colore_base, balayage, etc.)
-   - Preferred date (convert "tomorrow" to {TOMORROW})
+   - Preferred date (convert "tomorrow" to {dates['tomorrow']})
    - Preferred time (use 24h format: 15:00 for 3 PM)
 
-2. ASK FOR CONFIRMATION:
-   - After collecting everything, show summary: "Perfect! [Name], [Service] on [Date] at [Time]. Should I confirm?"
-   - Wait for customer to say yes/ok/confirm/sì
+⚠️ NAME REQUIREMENT - CRITICAL:
+   You MUST know the customer's name BEFORE asking for confirmation or booking.
+
+   If customer gives service + date + time but NO name:
+   → Ask: "Could you please tell me your name?" / "Potresti dirmi il tuo nome?"
+   → Do NOT show confirmation summary without the name!
+
+   ❌ WRONG: "Taglio donna domani alle 10. Confermi?" (no name!)
+   ✅ CORRECT: "Perfetto! Potresti dirmi il tuo nome per completare la prenotazione?"
+
+   The customer's name can be provided:
+   - Explicitly: "mi chiamo Maria" / "my name is John"
+   - In the request: "book for Marco tomorrow at 2pm"
+
+   If you don't have the name, ASK FOR IT before showing confirmation.
+
+2. ⚠️ CHECK AVAILABILITY FIRST - MANDATORY BEFORE CONFIRMATION:
+   BEFORE asking "Confermi?", you MUST call check_availability(date, time) to verify the slot is free!
+
+   ❌ WRONG FLOW (causes frustration):
+      User: "Vorrei prenotare un balayage domani alle 9"
+      Bot: "Perfetto! Balayage domani alle 9:00. Confermi?"  (WRONG - didn't check!)
+      User: "Si"
+      Bot: "Mi dispiace, l'orario non è disponibile..." (Customer already said yes!)
+
+   ✅ CORRECT FLOW:
+      User: "Vorrei prenotare un balayage domani alle 9"
+      Bot: [FIRST call check_availability("2026-01-25", "09:00")]
+      If available=true → "Perfetto! Balayage domani 25 gennaio alle 9:00. Confermi?"
+      If available=false → "Mi dispiace, le 9:00 non sono disponibili. Gli orari liberi sono: 10:00, 11:00, 14:00. Quale preferisci?"
+
+   NEVER ask "Confermi?" without first verifying the slot is available!
+
+3. ASK FOR CONFIRMATION - ONLY IF SLOT IS AVAILABLE:
+   - ONLY after collecting ALL info (name, service, date, time) AND verifying availability
+   - Show summary and ASK "Confermi?" / "Is that correct?"
+   - ⚠️ DO NOT call create_appointment yet! Wait for customer response!
+
+   ❌ WRONG FLOW:
+      User: "mi chiamo Marco"
+      Bot: "Prenotazione confermata!" (WRONG - didn't ask for confirmation!)
+
+   ✅ CORRECT FLOW:
+      User: "mi chiamo Marco"
+      Bot: [call check_availability first if not done]
+      Bot: "Perfetto Marco! Taglio uomo sabato 3 gennaio alle 10:00. Confermi?"
+      User: "si"
+      Bot: [NOW call create_appointment] "Prenotazione confermata!"
+
+   The customer MUST say yes/ok/si/confirm BEFORE you call create_appointment!
+
+⚠️ DATE CONFIRMATION - CRITICAL:
+   When customer says a day name (Friday, Saturday, domani, venerdi, lunedi, etc.):
+   → ALWAYS show the FULL DATE with day, number, month, year
+   → NEVER just repeat the day name back
+
+   ❌ WRONG: "Ok, Friday at 10am?"
+   ✅ CORRECT: "Ok, Friday 9 January 2026 at 10:00?"
+
+   ❌ WRONG: "Perfetto, venerdi alle 10?"
+   ✅ CORRECT: "Perfetto, venerdì 9 gennaio 2026 alle 10:00?"
+
+   This lets the customer verify you picked the RIGHT date before booking.
 
 3. ⚠️ BOOKING CONFIRMATION RULE - CRITICAL:
-   When customer says "yes" or "confirm" or "ok" or "sì":
+   When customer confirms (yes/ok/confirm in any language):
 
    → STEP 1: Call create_appointment(customer_name, service_type, date, time)
    → STEP 2: Wait for the tool to return
    → STEP 3: Check if success=True
-   → STEP 4: ONLY THEN say "Booking confirmed!"
+   → STEP 4: ONLY THEN confirm to customer in their language
 
-   ❌ WRONG: Say "Prenotazione confermata!" without calling create_appointment
+   ❌ WRONG: Say "confirmed" without calling create_appointment
    ❌ WRONG: Say "Done!" without calling create_appointment
    ❌ WRONG: Ask "Should I confirm?" and then say "confirmed" without calling tool
 
-   ✅ CORRECT: Call create_appointment → get success=True → say "Confermato!"
+   ✅ CORRECT: Call create_appointment → get success=True → then confirm
 
    If you say "confirmed" but didn't call create_appointment, the booking was NOT saved!
    The customer will show up and have NO appointment!
 
+💶 PRICE IN CONFIRMATIONS RULE (IMP-015):
+   When confirming a booking (after create_appointment returns success):
+   → Do NOT mention the price in the confirmation message
+   → Prices are for reference when listing services, not for booking confirmations
+   → Payment happens in-salon — do not quote totals
+
+   ✅ CORRECT: "Perfetto! Taglio Donna con Marco martedì 3 giugno alle 10:00. A presto!"
+   ❌ WRONG:   "Perfetto! Taglio Donna €60 con Marco martedì 3 giugno alle 10:00."
+
+🔕 AUTO-ADDON OPERATOR RULE (IMP-014):
+   When a booking includes an automatic follow-up service (e.g., Piega after Taglio):
+   → Confirm the follow-up service name and time in the booking summary
+   → Do NOT mention which operator will perform the follow-up service
+   → Only tell the customer the addon operator IF they specifically ask "chi farà la piega?" or similar
+
+   ✅ CORRECT: "Prenotato! Taglio con Marco alle 10:00 e Piega alle 10:30."
+   ❌ WRONG:   "Prenotato! Taglio con Marco alle 10:00 e Piega con Giulia alle 10:30."
+
 ⚠️ AFTER BOOKING IS CONFIRMED - DO NOT BOOK AGAIN:
-   Once you confirm a booking and say "Your appointment is confirmed...",
-   if customer replies with:
-   - "ok", "ok thank you", "thanks", "thank you", "great", "perfect"
-   - "grazie", "ok grazie", "perfetto", "va bene"
+   Once you confirm a booking, if customer replies with acknowledgment words like:
+   - "ok", "thank you", "thanks", "great", "perfect", "grazie", "perfetto", "va bene"
 
    → This is just ACKNOWLEDGMENT! Do NOT call create_appointment again!
-   → Simply reply: "You're welcome! See you then!" or "Prego! A presto!"
+   → Simply say "You're welcome! See you then!" in their language
 
    ❌ WRONG: Customer says "ok thank you" → call create_appointment again
    ✅ CORRECT: Customer says "ok thank you" → reply "You're welcome!"
@@ -327,11 +598,15 @@ BOOKING FLOW:
    - modify_appointment: Change/reschedule an existing appointment
    - cancel_appointment: Cancel a booking
 
-4. MODIFY/CANCEL - IMPORTANT:
+4. MODIFY/CANCEL - SIMPLE APPROACH:
+   - To cancel: call cancel_appointment(customer_name, date, time)
+   - To modify: call modify_appointment(customer_name, current_date, current_time, new_date, new_time, new_service)
+
+   NO IDs NEEDED! Just use the customer's name and the appointment date/time.
+
    - If customer wants to modify or cancel:
-     → Call get_customer_appointments to see their appointments
      → If they have ONE appointment, PROCEED IMMEDIATELY with the action
-     → If they have MULTIPLE appointments, ask ONCE which one
+     → If they have MULTIPLE appointments, ask ONCE which one (by name/date/time)
 
    - MODIFY RULE: If customer says "reschedule to 4pm" or "move it to 3pm":
      → They already specified the new time! Don't ask again!
@@ -340,24 +615,6 @@ BOOKING FLOW:
 
    - CONFLICTING TIMES: If customer says "3pm no wait 4pm actually 5pm":
      → Use the LAST time mentioned (5pm in this example)
-     → Call modify_appointment with that final time
-     → Don't check all times - just use the last one they said
-
-   - To modify: MUST call modify_appointment(appointment_id, new_date, new_time, new_service)
-   - To cancel: MUST call cancel_appointment(appointment_id)
-
-⚠️ CRITICAL - USE CORRECT APPOINTMENT_ID:
-   When calling modify_appointment or cancel_appointment:
-   → You MUST use the EXACT 'appointment_id' from get_customer_appointments result!
-   → The appointment_id is a NUMBER like 50, 51, 52, 53, etc.
-   → Do NOT use 1, 2, 3 - those are just list positions, NOT appointment IDs!
-
-   EXAMPLE:
-   get_customer_appointments returns appointments with appointment_id: 53, 51, etc.
-   Customer wants to reschedule the 3:30 PM one (which has appointment_id=53):
-   ❌ WRONG: modify_appointment(appointment_id=1, ...) ← 1 is list position, NOT the ID!
-   ❌ WRONG: modify_appointment(appointment_id=2, ...) ← 2 is list position, NOT the ID!
-   ✅ CORRECT: modify_appointment(appointment_id=53, ...) ← Use the ACTUAL appointment_id!
 
 5. TIME FORMAT:
    - Always show times in 12h format (e.g., "6:00 PM" instead of "18:00")
@@ -380,16 +637,17 @@ BOOKING FLOW:
       → NEVER just say "booked" - you MUST call this tool
 
    2. get_customer_appointments()
-      → Call when: Customer wants to see, modify, or cancel appointments
-      → Returns appointment 'id' needed for modify/cancel
+      → Call when: Customer wants to see their appointments
 
-   3. modify_appointment(appointment_id, new_date, new_time, new_service)
+   3. modify_appointment(customer_name, current_date, current_time, new_date, new_time, new_service)
       → Call when: Customer wants to reschedule or change service
-      → Use null for fields that shouldn't change
+      → Use the customer's name and CURRENT appointment date/time
+      → Use null for new_date/new_time/new_service if not changing
       → NEVER just say "rescheduled" - you MUST call this tool
 
-   4. cancel_appointment(appointment_id)
+   4. cancel_appointment(customer_name, date, time)
       → Call when: Customer confirms they want to cancel
+      → Use the customer's name and appointment date/time
       → NEVER just say "cancelled" - you MUST call this tool
 
    5. check_availability(date, time)
@@ -399,18 +657,56 @@ BOOKING FLOW:
       → Call when: Customer asks what times are available
 
    7. confirm_reminder()
-      → Call when: Customer confirms they will come to their TOMORROW appointment
-      → This is for reminder confirmations, NOT new bookings
-      → Examples: "ci sarò", "confermo", "vengo", "ok ci vediamo domani", "yes I'll be there"
-      → If success=True, thank them warmly
-      → If success=False (no appointment tomorrow), just respond normally
+      → Call when: Customer confirms they will come to their upcoming appointment
+      → Works for ANY future appointment, not just tomorrow
+      → Examples: "confermo", "ci sarò", "vengo", "yes I'll be there", "see you Tuesday"
+      → IMPORTANT: If customer says "confermo" or "I confirm" → CALL THIS FUNCTION!
+      → If success=True, thank them warmly in their language
+      → If success=False, just respond normally (they may not have an appointment)
+
+   8. escalate_to_human(reason)
+      → Call when: Customer has a COMPLAINT, is ANGRY, FRUSTRATED, or asks to speak with a manager/human
+      → This freezes the chat and notifies the owner via email
+      → After calling this, respond: "Ho inoltrato la tua richiesta al nostro team. Ti contatteranno il prima possibile."
+      → Examples of when to use:
+         - "Sono molto deluso dal servizio" (complaint)
+         - "Voglio parlare con il responsabile" (ask for manager)
+         - "Il taglio era orribile" (complaint about service)
+         - "Questo è inaccettabile!" (angry customer)
+         - "I want to speak to a human" (ask for human)
 
    ⚡ ACTION = TOOL CALL
-   If customer says "reschedule to 3pm" → CALL modify_appointment
-   If customer says "cancel my appointment" → CALL cancel_appointment
+   If customer says "reschedule to 3pm" → CALL modify_appointment with new_time="15:00"
+   If customer says "cancel my appointment" → CALL cancel_appointment with name/date/time
    If customer says "yes, book it" → CALL create_appointment
-   If customer confirms tomorrow's reminder → CALL confirm_reminder
+   If customer confirms their appointment ("confermo", "ci sarò", "vengo") → CALL confirm_reminder
    TALKING about doing something is NOT the same as DOING it!
+
+📅 DATE DISPLAY RULE (IMP-001):
+   When showing dates to customers, DO NOT include the year if it's the current year ({dates['year']}).
+
+   ❌ WRONG: "mercoledì 6 gennaio 2026 alle 17:00" (year unnecessary)
+   ✅ CORRECT: "mercoledì 6 gennaio alle 17:00" (clean, current year implied)
+
+   Only show the year for dates in future years (2027+):
+   ✅ "mercoledì 6 gennaio 2027 alle 17:00" (year needed - it's next year)
+
+🚫 SALON TOPICS ONLY (IMP-007):
+   You are ONLY here to help with salon-related topics:
+   - Appointments (booking, modifying, canceling)
+   - Services and prices
+   - Business hours and location
+   - Hair care advice (basic)
+
+   If customer asks about NON-SALON topics (travel, weather, recipes, etc.):
+   → Politely decline: "Mi dispiace, posso aiutarti solo con questioni relative al salone! Hai bisogno di prenotare un appuntamento?"
+   → In English: "Sorry, I can only help with salon-related questions! Do you need to book an appointment?"
+
+   Examples of what to DECLINE:
+   - "What's the weather tomorrow?" → Decline
+   - "Can you recommend a restaurant?" → Decline
+   - "Tell me a joke" → Decline
+   - "What's the capital of France?" → Decline
 
 Respond naturally and warmly like a real salon employee named Simone."""
 
@@ -436,7 +732,7 @@ def normalize_phone(phone: str) -> str:
 # GOOGLE CALENDAR FUNCTIONS
 # ============================================================================
 
-def create_calendar_event(customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None) -> str:
+def create_calendar_event(customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None, business: dict = None, operator_name: str = None) -> str:
     """
     Create a Google Calendar event for the appointment.
     Returns: event_id if successful, None if failed
@@ -452,9 +748,23 @@ def create_calendar_event(customer_name: str, service: Dict, date_str: str, time
         start_dt = ITALY_TZ.localize(dt)
         end_dt = start_dt + timedelta(minutes=service.get("duration", 60))
 
+        # Build summary and description with operator info
+        summary = f"{service.get('name_it', 'Appuntamento')} - {customer_name}"
+        if operator_name:
+            summary += f" (con {operator_name})"
+
+        description_lines = [
+            f"Cliente: {customer_name}",
+            f"Telefono: {customer_phone or 'N/A'}",
+            f"Servizio: {service.get('name_it')}",
+            f"Prezzo: €{service.get('price', 0)}",
+        ]
+        if operator_name:
+            description_lines.append(f"Stilista: {operator_name}")
+
         event = {
-            "summary": f"{service.get('name_it', 'Appuntamento')} - {customer_name}",
-            "description": f"Cliente: {customer_name}\nTelefono: {customer_phone or 'N/A'}\nServizio: {service.get('name_it')}\nPrezzo: €{service.get('price', 0)}",
+            "summary": summary,
+            "description": "\n".join(description_lines),
             "start": {
                 "dateTime": start_dt.isoformat(),
                 "timeZone": "Europe/Rome"
@@ -472,7 +782,8 @@ def create_calendar_event(customer_name: str, service: Dict, date_str: str, time
             }
         }
 
-        result = service_obj.events().insert(calendarId=GOOGLE_CALENDAR_ID, body=event).execute()
+        calendar_id = (business or {}).get("google_calendar_id") or GOOGLE_CALENDAR_ID
+        result = service_obj.events().insert(calendarId=calendar_id, body=event).execute()
         event_id = result.get("id")
         logger.info(f"✅ Calendar event created: {event_id}")
         return event_id
@@ -482,7 +793,7 @@ def create_calendar_event(customer_name: str, service: Dict, date_str: str, time
         return None
 
 
-def update_calendar_event(event_id: str, customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None) -> bool:
+def update_calendar_event(event_id: str, customer_name: str, service: Dict, date_str: str, time_str: str, customer_phone: str = None, business: dict = None, operator_name: str = None) -> bool:
     """
     Update an existing Google Calendar event.
     Returns: True if successful, False if failed
@@ -501,9 +812,22 @@ def update_calendar_event(event_id: str, customer_name: str, service: Dict, date
         start_dt = ITALY_TZ.localize(dt)
         end_dt = start_dt + timedelta(minutes=service.get("duration", 60))
 
+        summary = f"{service.get('name_it', 'Appuntamento')} - {customer_name}"
+        if operator_name:
+            summary += f" (con {operator_name})"
+
+        description_lines = [
+            f"Cliente: {customer_name}",
+            f"Telefono: {customer_phone or 'N/A'}",
+            f"Servizio: {service.get('name_it')}",
+            f"Prezzo: €{service.get('price', 0)}",
+        ]
+        if operator_name:
+            description_lines.append(f"Stilista: {operator_name}")
+
         event = {
-            "summary": f"{service.get('name_it', 'Appuntamento')} - {customer_name}",
-            "description": f"Cliente: {customer_name}\nTelefono: {customer_phone or 'N/A'}\nServizio: {service.get('name_it')}\nPrezzo: €{service.get('price', 0)}",
+            "summary": summary,
+            "description": "\n".join(description_lines),
             "start": {
                 "dateTime": start_dt.isoformat(),
                 "timeZone": "Europe/Rome"
@@ -514,7 +838,8 @@ def update_calendar_event(event_id: str, customer_name: str, service: Dict, date
             }
         }
 
-        service_obj.events().update(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id, body=event).execute()
+        calendar_id = (business or {}).get("google_calendar_id") or GOOGLE_CALENDAR_ID
+        service_obj.events().update(calendarId=calendar_id, eventId=event_id, body=event).execute()
         logger.info(f"✅ Calendar event updated: {event_id}")
         return True
 
@@ -523,7 +848,7 @@ def update_calendar_event(event_id: str, customer_name: str, service: Dict, date
         return False
 
 
-def delete_calendar_event(event_id: str) -> bool:
+def delete_calendar_event(event_id: str, business: dict = None) -> bool:
     """
     Delete a Google Calendar event.
     Returns: True if successful, False if failed
@@ -537,7 +862,8 @@ def delete_calendar_event(event_id: str) -> bool:
             logger.warning("⚠️ Google Calendar not available, skipping event deletion")
             return False
 
-        service_obj.events().delete(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id).execute()
+        calendar_id = (business or {}).get("google_calendar_id") or GOOGLE_CALENDAR_ID
+        service_obj.events().delete(calendarId=calendar_id, eventId=event_id).execute()
         logger.info(f"✅ Calendar event deleted: {event_id}")
         return True
 
@@ -570,7 +896,7 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
         return False
 
 
-def get_tomorrow_appointments() -> List[Dict]:
+def get_tomorrow_appointments(business_id: int = None) -> List[Dict]:
     """Get all confirmed appointments for tomorrow"""
     try:
         conn = get_db_connection()
@@ -578,27 +904,72 @@ def get_tomorrow_appointments() -> List[Dict]:
 
         tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        cur.execute("""
-            SELECT id, customer_phone, customer_name, service_type,
-                   appointment_date, appointment_time, price
-            FROM salon_appointments
-            WHERE appointment_date = %s
-              AND status = 'confirmed'
-              AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
-            ORDER BY appointment_time
-        """, (tomorrow,))
-
         appointments = []
-        for row in cur.fetchall():
-            appointments.append({
-                "id": row[0],
-                "phone": row[1],
-                "name": row[2],
-                "service": row[3],
-                "date": row[4],
-                "time": row[5],
-                "price": row[6]
-            })
+        if business_id is not None:
+            # Multi-tenant: exclude auto-addon children (they are covered by parent's reminder)
+            cur.execute("""
+                SELECT id, customer_phone, customer_name, treatment_code,
+                       appointment_date, appointment_time, price,
+                       treatment_name, operator_name
+                FROM appointments
+                WHERE business_id = %s AND appointment_date = %s
+                  AND status = 'confirmed'
+                  AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
+                  AND COALESCE(is_auto_addon, FALSE) = FALSE
+                ORDER BY appointment_time
+            """, (business_id, tomorrow))
+            for row in cur.fetchall():
+                apt = {
+                    "id": row[0],
+                    "phone": row[1],
+                    "name": row[2],
+                    "service": row[3],
+                    "date": row[4],
+                    "time": row[5],
+                    "price": row[6],
+                    "treatment_name": row[7],
+                    "operator_name": row[8],
+                    "addons": []
+                }
+                # Fetch auto-addon children so we can include them in the reminder
+                cur.execute("""
+                    SELECT id, appointment_time, treatment_name, treatment_code
+                    FROM appointments
+                    WHERE parent_appointment_id = %s AND status = 'confirmed'
+                    ORDER BY appointment_time
+                """, (apt["id"],))
+                for addon_row in cur.fetchall():
+                    apt["addons"].append({
+                        "id": addon_row[0],
+                        "time": addon_row[1],
+                        "treatment_name": addon_row[2],
+                        "treatment_code": addon_row[3],
+                    })
+                appointments.append(apt)
+        else:
+            # Legacy: old salon_appointments table
+            cur.execute("""
+                SELECT id, customer_phone, customer_name, service_type,
+                       appointment_date, appointment_time, price
+                FROM salon_appointments
+                WHERE appointment_date = %s
+                  AND status = 'confirmed'
+                  AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
+                ORDER BY appointment_time
+            """, (tomorrow,))
+            for row in cur.fetchall():
+                appointments.append({
+                    "id": row[0],
+                    "phone": row[1],
+                    "name": row[2],
+                    "service": row[3],
+                    "date": row[4],
+                    "time": row[5],
+                    "price": row[6],
+                    "treatment_name": None,
+                    "operator_name": None,
+                    "addons": []
+                })
 
         cur.close()
         conn.close()
@@ -647,16 +1018,21 @@ def get_unconfirmed_appointments() -> List[Dict]:
         return []
 
 
-def mark_reminder_sent(appointment_id: int) -> bool:
+def mark_reminder_sent(appointment_id: int, business_id: int = None) -> bool:
     """Mark that reminder was sent for an appointment"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("""
-            UPDATE salon_appointments
-            SET reminder_sent_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-        """, (appointment_id,))
+        if business_id is not None:
+            cur.execute("""UPDATE appointments SET reminder_sent_at = CURRENT_TIMESTAMP WHERE id = %s""",
+                        (appointment_id,))
+            # Cascade to auto-addon children so they don't get a duplicate reminder
+            cur.execute("""UPDATE appointments SET reminder_sent_at = CURRENT_TIMESTAMP
+                           WHERE parent_appointment_id = %s""",
+                        (appointment_id,))
+        else:
+            cur.execute("""UPDATE salon_appointments SET reminder_sent_at = CURRENT_TIMESTAMP WHERE id = %s""",
+                        (appointment_id,))
         conn.commit()
         cur.close()
         conn.close()
@@ -666,26 +1042,55 @@ def mark_reminder_sent(appointment_id: int) -> bool:
         return False
 
 
-def mark_reminder_confirmed(phone: str) -> Dict:
-    """Mark appointment as confirmed by customer"""
+def mark_reminder_confirmed(phone: str, business_id: int = None) -> Dict:
+    """Mark appointment as confirmed by customer - works for any future appointment"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+        today = datetime.now(ITALY_TZ).strftime("%Y-%m-%d")
         normalized_phone = normalize_phone(phone)
 
-        # Find appointment for tomorrow from this phone
-        cur.execute("""
-            UPDATE salon_appointments
-            SET reminder_confirmed = TRUE,
-                reminder_confirmed_at = CURRENT_TIMESTAMP
-            WHERE customer_phone = %s
-              AND appointment_date = %s
-              AND status = 'confirmed'
-              AND reminder_sent_at IS NOT NULL
-            RETURNING id, customer_name, service_type, appointment_time
-        """, (normalized_phone, tomorrow))
+        # Find the NEXT upcoming appointment from this phone (not just tomorrow)
+        # This fixes BUG-006: allows confirmation for any future appointment
+        if business_id is not None:
+            cur.execute("""
+                UPDATE appointments
+                SET reminder_confirmed = TRUE,
+                    reminder_confirmed_at = CURRENT_TIMESTAMP
+                WHERE customer_phone = %s
+                  AND appointment_date >= %s
+                  AND business_id = %s
+                  AND status = 'confirmed'
+                  AND id = (
+                      SELECT id FROM appointments
+                      WHERE customer_phone = %s
+                        AND appointment_date >= %s
+                        AND business_id = %s
+                        AND status = 'confirmed'
+                      ORDER BY appointment_date, appointment_time
+                      LIMIT 1
+                  )
+                RETURNING id, customer_name, treatment_code, appointment_date, appointment_time
+            """, (normalized_phone, today, business_id, normalized_phone, today, business_id))
+        else:
+            cur.execute("""
+                UPDATE salon_appointments
+                SET reminder_confirmed = TRUE,
+                    reminder_confirmed_at = CURRENT_TIMESTAMP
+                WHERE customer_phone = %s
+                  AND appointment_date >= %s
+                  AND status = 'confirmed'
+                  AND id = (
+                      SELECT id FROM salon_appointments
+                      WHERE customer_phone = %s
+                        AND appointment_date >= %s
+                        AND status = 'confirmed'
+                      ORDER BY appointment_date, appointment_time
+                      LIMIT 1
+                  )
+                RETURNING id, customer_name, service_type, appointment_date, appointment_time
+            """, (normalized_phone, today, normalized_phone, today))
 
         result = cur.fetchone()
         conn.commit()
@@ -693,61 +1098,171 @@ def mark_reminder_confirmed(phone: str) -> Dict:
         conn.close()
 
         if result:
-            # Convert time to string for JSON serialization
-            time_obj = result[3]
+            # Convert date and time to string for JSON serialization
+            date_obj = result[3]
+            time_obj = result[4]
+            date_str = date_obj.strftime("%Y-%m-%d") if hasattr(date_obj, 'strftime') else str(date_obj)
             time_str = time_obj.strftime("%H:%M") if hasattr(time_obj, 'strftime') else str(time_obj)[:5]
             return {
                 "success": True,
                 "appointment_id": result[0],
                 "name": result[1],
                 "service": result[2],
-                "time": time_str
+                "date": date_str,
+                "time": time_str,
+                "message": f"Appointment for {result[1]} on {date_str} at {time_str} confirmed!"
             }
-        return {"success": False, "reason": "No pending reminder found"}
+        return {"success": False, "reason": "No upcoming appointment found for this phone"}
     except Exception as e:
         logger.error(f"❌ Error confirming reminder: {e}")
         return {"success": False, "reason": str(e)}
 
 
+def escalate_to_human(phone: str, reason: str, biz_context: dict = None) -> Dict:
+    """
+    Escalate conversation to a real person (owner).
+    - Blocks the chat so bot won't respond
+    - Sends email to owner with unblock link
+    """
+    try:
+        # Block the chat
+        chat_blocked[phone] = reason
+        logger.info(f"🔒 Chat blocked for {phone}. Reason: {reason}")
+
+        # Create unblock link
+        # Use the EC2 public IP or domain
+        base_url = os.getenv("BOT_BASE_URL", "http://3.239.106.181:8000")
+        unblock_link = f"{base_url}/sblocca_chat/{phone}"
+
+        biz_name = biz_context["business"].get("name", "Salon") if biz_context else "Aura Hair Studio"
+        owner_email_addr = biz_context["business"].get("owner_email") if biz_context else None
+
+        # Send email to owner
+        email_body = f"""⚠️ ATTENZIONE: Richiesta di intervento umano
+
+Telefono cliente: {phone}
+Motivo: {reason}
+
+La chat è stata bloccata automaticamente. Il bot non risponderà più a questo cliente.
+
+🔓 Per sbloccare la chat e riprendere il servizio automatico:
+{unblock_link}
+
+---
+{biz_name} - Sistema di notifica automatico
+"""
+        email_sent = send_alert_email(
+            "⚠️ Intervento umano richiesto", email_body,
+            to_email=owner_email_addr, business_name=biz_name
+        )
+
+        return {
+            "success": True,
+            "chat_blocked": True,
+            "email_sent": email_sent,
+            "message": "La conversazione è stata trasferita al nostro team. Ti contatteremo il prima possibile."
+        }
+    except Exception as e:
+        logger.error(f"❌ Error escalating to human: {e}")
+        return {"success": False, "error": str(e)}
+
+
 async def send_reminder_messages():
-    """Send reminder messages to all customers with tomorrow's appointments (runs at 10 AM)"""
+    """Send reminder messages for ALL businesses (runs at 10 AM)"""
     logger.info("🔔 Starting daily reminder job...")
 
-    appointments = get_tomorrow_appointments()
-    logger.info(f"📋 Found {len(appointments)} appointments for tomorrow")
+    # Get all active businesses with WhatsApp configured
+    businesses = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, name, whatsapp_phone_number_id, meta_access_token, timezone
+               FROM businesses WHERE status = 'active' AND whatsapp_phone_number_id IS NOT NULL"""
+        )
+        businesses = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Failed to load businesses for reminders: {e}")
 
-    for apt in appointments:
-        # Format time for message
-        time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
-
-        # Client-provided reminder message
-        reminder_message = f"""Buongiorno!😊
+    if not businesses:
+        # Legacy single-tenant fallback
+        appointments = get_tomorrow_appointments()
+        logger.info(f"📋 Found {len(appointments)} appointments for tomorrow (legacy)")
+        for apt in appointments:
+            time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
+            reminder_message = f"""Buongiorno!😊
 Ti ricordiamo che domani alle ore {time_str} hai un appuntamento con noi.
 Ti chiediamo gentilmente di confermare rispondendo a questo messaggio entro le 18:00 di oggi.
 
 In caso di mancata conferma, non possiamo garantire la disponibilità dell'appuntamento.
 
 Grazie!"""
+            phone = apt["phone"]
+            if not phone.startswith("+"):
+                phone = "+" + phone
+            success = await send_whatsapp_message(phone, reminder_message)
+            if success:
+                mark_reminder_sent(apt["id"])
+                save_conversation_to_db(
+                    phone=normalize_phone(phone), name=apt["name"],
+                    message="[SISTEMA: Promemoria appuntamento inviato automaticamente]",
+                    response=reminder_message
+                )
+                logger.info(f"✅ Reminder sent to {apt['name']} ({phone})")
+            else:
+                logger.error(f"❌ Failed to send reminder to {apt['name']} ({phone})")
+        logger.info(f"🔔 Reminder job completed (legacy). Sent {len(appointments)} reminders.")
+        return
 
-        # Send WhatsApp message
-        phone = apt["phone"]
-        if not phone.startswith("+"):
-            phone = "+" + phone
+    total_sent = 0
+    for biz_id, biz_name, wa_phone_id, wa_token, tz_name in businesses:
+        business = {"whatsapp_phone_number_id": wa_phone_id, "meta_access_token": wa_token, "name": biz_name}
+        appointments = get_tomorrow_appointments(business_id=biz_id)
+        logger.info(f"📋 [{biz_name}] Found {len(appointments)} appointments for tomorrow")
 
-        success = await send_whatsapp_message(phone, reminder_message)
+        for apt in appointments:
+            time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
+            service_label = apt.get("treatment_name") or apt.get("service") or ""
+            service_part = f" per *{service_label}*" if service_label else ""
+            addon_part = ""
+            for addon in apt.get("addons", []):
+                addon_time = addon["time"]
+                addon_time_str = addon_time.strftime("%H:%M") if hasattr(addon_time, 'strftime') else str(addon_time)[:5]
+                addon_name = addon.get("treatment_name") or addon.get("treatment_code") or ""
+                if addon_name:
+                    addon_part += f"\nSeguito da *{addon_name}* alle ore {addon_time_str}."
+            reminder_message = f"""Buongiorno!😊
+Ti ricordiamo che domani alle ore {time_str} hai un appuntamento{service_part} con noi.{addon_part}
+Ti chiediamo gentilmente di confermare rispondendo a questo messaggio entro le 18:00 di oggi.
 
-        if success:
-            mark_reminder_sent(apt["id"])
-            logger.info(f"✅ Reminder sent to {apt['name']} ({phone}) for {time_str}")
-        else:
-            logger.error(f"❌ Failed to send reminder to {apt['name']} ({phone})")
+In caso di mancata conferma, non possiamo garantire la disponibilità dell'appuntamento.
 
-    logger.info(f"🔔 Reminder job completed. Sent {len(appointments)} reminders.")
+Grazie!"""
+            phone = apt["phone"]
+            if not phone.startswith("+"):
+                phone = "+" + phone
+            success = await send_whatsapp_message(phone, reminder_message, business)
+            if success:
+                mark_reminder_sent(apt["id"], business_id=biz_id)
+                save_conversation_to_db(
+                    phone=normalize_phone(phone), name=apt["name"],
+                    message="[SISTEMA: Promemoria appuntamento inviato automaticamente]",
+                    response=reminder_message, business_id=biz_id
+                )
+                total_sent += 1
+                logger.info(f"✅ [{biz_name}] Reminder sent to {apt['name']} ({phone})")
+            else:
+                logger.error(f"❌ [{biz_name}] Failed to send reminder to {apt['name']} ({phone})")
+
+    logger.info(f"🔔 Reminder job completed. Sent {total_sent} reminders across {len(businesses)} businesses.")
 
 
 async def check_unconfirmed_and_notify():
-    """Check for unconfirmed appointments and email owner (runs at 6 PM)"""
-    logger.info("📧 Starting unconfirmed appointments check...")
+    """Disabled per Bug #16 — unconfirmed appointment emails turned off."""
+    logger.info("📧 check_unconfirmed_and_notify: disabled (Bug #16), skipping.")
+    return
 
     unconfirmed = get_unconfirmed_appointments()
     logger.info(f"📋 Found {len(unconfirmed)} unconfirmed appointments")
@@ -806,8 +1321,16 @@ def setup_reminder_scheduler():
         replace_existing=True
     )
 
+    # 10:05 AM - Send Instagram reminders (5 min after WhatsApp to avoid overlap)
+    scheduler.add_job(
+        send_ig_reminder_messages,
+        CronTrigger(hour=10, minute=5, timezone=ITALY_TZ),
+        id="ig_send_reminders",
+        replace_existing=True
+    )
+
     scheduler.start()
-    logger.info("✅ Reminder scheduler started (10 AM reminders, 6 PM check)")
+    logger.info("✅ Reminder scheduler started (10:00 WA reminders, 10:05 IG reminders, 18:00 check)")
 
 
 # ============================================================================
@@ -818,12 +1341,62 @@ def get_db_connection():
     """Get database connection"""
     return psycopg2.connect(**DB_CONFIG)
 
+
+def load_conversation_history_from_db(phone: str, limit: int = 5, business_id: int = None) -> list:
+    """Load recent conversation history from database for context continuity."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        if business_id is not None:
+            # Multi-tenant: new conversations table with JSONB messages
+            # Bug #1 fix: only reuse history if last activity within 4h (else stale = new session)
+            cur.execute(
+                """SELECT messages, updated_at FROM conversations
+                   WHERE business_id = %s AND customer_phone = %s""",
+                (business_id, phone),
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0] and isinstance(row[0], list):
+                from datetime import datetime, timezone, timedelta
+                updated_at = row[1]
+                if updated_at is not None:
+                    now = datetime.now(timezone.utc)
+                    if updated_at.tzinfo is None:
+                        updated_at = updated_at.replace(tzinfo=timezone.utc)
+                    if now - updated_at > timedelta(hours=4):
+                        logger.info(f"⏰ Session idle >4h for {phone} — starting fresh")
+                        return []
+                return row[0][-(limit * 2):]  # Last N exchanges (user+assistant)
+            return []
+        else:
+            # Legacy: old salon_conversations table
+            cur.execute(
+                "SELECT message, response FROM salon_conversations WHERE phone = %s ORDER BY timestamp DESC LIMIT %s",
+                (phone, limit),
+            )
+            rows = cur.fetchall()
+            conn.close()
+            history = []
+            for row in reversed(rows):
+                user_msg, bot_response = row
+                if user_msg:
+                    history.append({"role": "user", "content": user_msg})
+                if bot_response:
+                    history.append({"role": "assistant", "content": bot_response})
+            if history:
+                logger.info(f"📚 Loaded {len(rows)} conversation(s) from DB for {phone}")
+            return history
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to load conversation history from DB: {e}")
+        return []
 def initialize_database():
     """Initialize salon appointments table"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
+
         # Create appointments table for salon
         cur.execute("""
             CREATE TABLE IF NOT EXISTS salon_appointments (
@@ -851,7 +1424,14 @@ def initialize_database():
             cur.execute("ALTER TABLE salon_appointments ADD COLUMN IF NOT EXISTS reminder_confirmed_at TIMESTAMP")
         except:
             pass  # Columns already exist
-        
+
+        # Add platform column for multi-platform support (Instagram + WhatsApp)
+        try:
+            cur.execute("ALTER TABLE salon_appointments ADD COLUMN IF NOT EXISTS platform VARCHAR(20) DEFAULT 'whatsapp'")
+            cur.execute("ALTER TABLE salon_conversations ADD COLUMN IF NOT EXISTS platform VARCHAR(20) DEFAULT 'whatsapp'")
+        except:
+            pass
+
         # Create conversation history table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS salon_conversations (
@@ -863,7 +1443,7 @@ def initialize_database():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         conn.commit()
         conn.close()
         logger.info("✅ Database initialized")
@@ -872,7 +1452,7 @@ def initialize_database():
         logger.error(f"❌ Database init error: {e}")
         return False
 
-def save_conversation_to_db(phone: str, name: str, message: str, response: str):
+def save_conversation_to_db(phone: str, name: str, message: str, response: str, platform: str = "whatsapp", business_id: int = None):
     """
     Save conversation to database for analytics and debugging.
     Wrapped in try/except so logging failure never breaks the bot.
@@ -880,13 +1460,31 @@ def save_conversation_to_db(phone: str, name: str, message: str, response: str):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO salon_conversations (phone, name, message, response, timestamp)
-            VALUES (%s, %s, %s, %s, NOW())
-        """, (phone, name, message, response))
+
+        if business_id is not None:
+            # Multi-tenant: upsert into conversations table with JSONB messages
+            new_messages = json.dumps([
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response},
+            ])
+            cur.execute(
+                """INSERT INTO conversations (business_id, customer_phone, messages, updated_at)
+                   VALUES (%s, %s, %s::jsonb, NOW())
+                   ON CONFLICT (business_id, customer_phone) DO UPDATE
+                   SET messages = conversations.messages || %s::jsonb,
+                       updated_at = NOW()""",
+                (business_id, phone, new_messages, new_messages),
+            )
+        else:
+            # Legacy: insert into salon_conversations
+            cur.execute("""
+                INSERT INTO salon_conversations (phone, name, message, response, platform, timestamp)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+            """, (phone, name, message, response, platform))
+
         conn.commit()
         conn.close()
-        logger.info(f"💾 Conversation logged for {phone}")
+        logger.info(f"💾 Conversation logged for {phone} (platform={platform})")
     except Exception as e:
         # Never fail the bot because of logging issues
         logger.warning(f"⚠️ Failed to log conversation: {e}")
@@ -922,14 +1520,12 @@ def validate_business_day_and_time(date_str: str, time_str: str = None) -> Dict[
         return {
             "valid": False,
             "error": "We are closed on Christmas Day (December 25)",
-            "error_it": "Siamo chiusi il giorno di Natale (25 dicembre)",
             "error_code": "CLOSED_HOLIDAY_CHRISTMAS"
         }
     if month_day == (1, 1):
         return {
             "valid": False,
             "error": "We are closed on New Year's Day (January 1)",
-            "error_it": "Siamo chiusi il giorno di Capodanno (1 gennaio)",
             "error_code": "CLOSED_HOLIDAY_NEWYEAR"
         }
 
@@ -937,54 +1533,51 @@ def validate_business_day_and_time(date_str: str, time_str: str = None) -> Dict[
     if weekday == 0:  # Monday
         return {
             "valid": False,
-            "error": f"We are closed on Mondays. We're open Tuesday-Saturday.",
-            "error_it": f"Siamo chiusi il lunedì. Siamo aperti da martedì a sabato.",
+            "error": "We are closed on Mondays. We're open Tuesday-Saturday.",
             "error_code": "CLOSED_MONDAY"
         }
     if weekday == 6:  # Sunday
         return {
             "valid": False,
-            "error": f"We are closed on Sundays. We're open Tuesday-Saturday.",
-            "error_it": f"Siamo chiusi la domenica. Siamo aperti da martedì a sabato.",
+            "error": "We are closed on Sundays. We're open Tuesday-Saturday.",
             "error_code": "CLOSED_SUNDAY"
         }
 
-    # Business hours validation - COMMENTED OUT until client confirms hours
-    # if time_str:
-    #     try:
-    #         parsed_time = datetime.strptime(time_str, "%H:%M")
-    #         hour = parsed_time.hour
-    #         minute = parsed_time.minute
-    #     except ValueError:
-    #         return {"valid": False, "error": "Invalid time format", "error_code": "INVALID_TIME_FORMAT"}
-    #
-    #     # Saturday hours: 9:00-17:00
-    #     if weekday == 5:  # Saturday
-    #         if hour < 9 or (hour >= 17):
-    #             return {
-    #                 "valid": False,
-    #                 "error": f"On Saturdays we're open 9:00-17:00. {time_str} is outside our hours.",
-    #                 "error_it": f"Il sabato siamo aperti dalle 9:00 alle 17:00. {time_str} è fuori orario.",
-    #                 "error_code": "OUTSIDE_SATURDAY_HOURS"
-    #             }
-    #     else:
-    #         # Tuesday-Friday hours: 9:00-18:00
-    #         if hour < 9 or (hour >= 18):
-    #             return {
-    #                 "valid": False,
-    #                 "error": f"We're open 9:00-18:00 on {day_names[weekday]}. {time_str} is outside our hours.",
-    #                 "error_it": f"Siamo aperti dalle 9:00 alle 18:00 il {day_names_it[weekday]}. {time_str} è fuori orario.",
-    #                 "error_code": "OUTSIDE_BUSINESS_HOURS"
-    #             }
-
     return {"valid": True}
+
+
+_LEGACY_WEEKDAY_SLOTS = [
+    "09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
+    "12:00", "12:30", "13:00", "13:30", "14:00", "14:30",
+    "15:00", "15:30", "16:00", "16:30", "17:00", "17:30",
+]
+
+
+def _get_slots_for_date(date_str: str, biz_context: dict = None, parsed_date=None) -> list:
+    """Generate all time slots for a date using business hours or legacy defaults."""
+    if biz_context:
+        dt = parsed_date or datetime.strptime(date_str, "%Y-%m-%d")
+        dow = dt.weekday()
+        day_hours = biz_context["hours"].get(dow, {})
+        if day_hours.get("is_open") and day_hours.get("open_time") and day_hours.get("close_time"):
+            return generate_available_slots(day_hours["open_time"], day_hours["close_time"])
+        return []
+    # Legacy Aura fallback
+    if parsed_date:
+        weekday = parsed_date.weekday()
+    else:
+        weekday = datetime.strptime(date_str, "%Y-%m-%d").weekday()
+    closing_hour = 17 if weekday == 5 else 18
+    return [f"{h:02d}:{m:02d}" for h in range(9, closing_hour) for m in (0, 30)]
 
 
 # ============================================================================
 # BOOKING FUNCTIONS (Called by AI)
 # ============================================================================
 
-def create_appointment(customer_phone: str, customer_name: str, service_type: str, date: str, time: str) -> Dict[str, Any]:
+def create_appointment(customer_phone: str, customer_name: str, service_type: str, date: str, time: str,
+                       platform: str = "whatsapp", business_id: int = None, biz_context: dict = None,
+                       operator_name: str = None) -> Dict[str, Any]:
     """Create a salon appointment"""
     try:
         # Normalize phone
@@ -995,61 +1588,185 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             return {"success": False, "error": "CUSTOMER_NAME_REQUIRED"}
         customer_name = customer_name.strip()
 
-        # Validate service
-        service = SALON_SERVICES.get(service_type.lower())
-        if not service:
+        # Reject generic placeholder names
+        generic_names = {"client", "cliente", "utente", "customer", "user", "ospite", "guest"}
+        if customer_name.lower() in generic_names:
             return {
                 "success": False,
-                "error": "INVALID_SERVICE",
-                "provided": service_type,
-                "valid_services": list(SALON_SERVICES.keys())
+                "error": "GENERIC_NAME_NOT_ALLOWED",
+                "message_it": "Per favore, chiedi il nome del cliente prima di prenotare.",
+                "message_en": "Please ask the customer's name before booking.",
             }
+
+        # Validate service
+        if biz_context:
+            services = biz_context["services"]
+            service = services.get(service_type.lower())
+            if not service:
+                return {
+                    "success": False,
+                    "error": "INVALID_SERVICE",
+                    "provided": service_type,
+                    "valid_services": list(services.keys())
+                }
+        else:
+            service = SALON_SERVICES.get(service_type.lower())
+            if not service:
+                return {
+                    "success": False,
+                    "error": "INVALID_SERVICE",
+                    "provided": service_type,
+                    "valid_services": list(SALON_SERVICES.keys())
+                }
 
         # Validate date and time together (check if in the past)
         try:
             appointment_datetime = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
-            if appointment_datetime < datetime.now():
+            if appointment_datetime < datetime.now(ITALY_TZ).replace(tzinfo=None):
                 return {"success": False, "error": "PAST_DATE_NOT_ALLOWED"}
         except ValueError:
             return {"success": False, "error": "INVALID_DATE_TIME_FORMAT", "provided_date": date, "provided_time": time}
 
         # Validate business hours, closed days, and holidays
-        business_validation = validate_business_day_and_time(date, time)
+        if biz_context:
+            business_validation = validate_day_and_time(date, time, biz_context["hours"], biz_context["closures"])
+        else:
+            business_validation = validate_business_day_and_time(date, time)
         if not business_validation["valid"]:
             return {
                 "success": False,
                 "error": business_validation["error_code"],
                 "message": business_validation["error"],
-                "message_it": business_validation.get("error_it", ""),
                 "date": date,
                 "time": time
             }
+
+        # Resolve operator (multi-tenant only)
+        operators = biz_context.get("operators", []) if biz_context else []
+        op_result = resolve_operator(operator_name, service_type, operators)
+        if not op_result["success"]:
+            return {"success": False, **op_result}
+
+        resolved_operator_id = op_result.get("operator_id")
+        resolved_operator_name = op_result.get("operator_name")
 
         conn = get_db_connection()
         try:
             cur = conn.cursor()
 
             # Check availability
-            cur.execute(
-                """SELECT COUNT(*) FROM salon_appointments
-                   WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                (date, time)
-            )
-            count = cur.fetchone()[0]
+            if business_id is not None:
+                if op_result.get("auto_assign"):
+                    # Auto-assign: pick least-busy eligible operator who is FREE at this time
+                    eligible_ids = op_result["eligible_operator_ids"]
+                    cur.execute(
+                        """SELECT o.id, o.display_name FROM operators o
+                           LEFT JOIN (
+                               SELECT operator_id, COUNT(*) cnt FROM appointments
+                               WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                               GROUP BY operator_id
+                           ) a ON a.operator_id = o.id
+                           WHERE o.id = ANY(%s)
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM appointments ap
+                                 WHERE ap.business_id = %s AND ap.operator_id = o.id
+                                   AND ap.appointment_date = %s AND ap.appointment_time = %s
+                                   AND ap.status = 'confirmed'
+                             )
+                           ORDER BY COALESCE(a.cnt, 0), o.sort_order LIMIT 1""",
+                        (business_id, date, eligible_ids, business_id, date, time)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        resolved_operator_id = row[0]
+                        resolved_operator_name = row[1]
+                        count = 0  # This operator is free at this time
+                    else:
+                        # All eligible operators are booked at this time
+                        count = 1
+
+                elif resolved_operator_id is not None:
+                    # Specific operator: check per-operator availability
+                    cur.execute(
+                        """SELECT COUNT(*) FROM appointments
+                           WHERE business_id = %s AND operator_id = %s
+                                 AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                        (business_id, resolved_operator_id, date, time)
+                    )
+                    count = cur.fetchone()[0]
+                    if count > 0 and operators:
+                        # Preferred operator busy — try auto-assign fallback
+                        eligible_ids = [op["id"] for op in operators]
+                        cur.execute(
+                            """SELECT o.id, o.display_name FROM operators o
+                               LEFT JOIN (
+                                   SELECT operator_id, COUNT(*) cnt FROM appointments
+                                   WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                                   GROUP BY operator_id
+                               ) a ON a.operator_id = o.id
+                               WHERE o.id = ANY(%s)
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM appointments ap
+                                     WHERE ap.business_id = %s AND ap.operator_id = o.id
+                                       AND ap.appointment_date = %s AND ap.appointment_time = %s
+                                       AND ap.status = 'confirmed'
+                                 )
+                               ORDER BY COALESCE(a.cnt, 0), o.sort_order LIMIT 1""",
+                            (business_id, date, eligible_ids, business_id, date, time)
+                        )
+                        fallback_row = cur.fetchone()
+                        if fallback_row:
+                            resolved_operator_id = fallback_row[0]
+                            resolved_operator_name = fallback_row[1]
+                            count = 0  # fallback operator is free
+                else:
+                    # No operators configured: legacy global check
+                    cur.execute(
+                        """SELECT COUNT(*) FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                        (business_id, date, time)
+                    )
+                    count = cur.fetchone()[0]
+            else:
+                cur.execute(
+                    """SELECT COUNT(*) FROM salon_appointments
+                       WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                    (date, time)
+                )
+                count = cur.fetchone()[0]
 
             if count > 0:
                 # Get available alternatives for the same date
-                cur.execute(
-                    """SELECT appointment_time FROM salon_appointments
-                       WHERE appointment_date = %s AND status = 'confirmed'
-                       ORDER BY appointment_time""",
-                    (date,)
-                )
+                if business_id is not None:
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                           ORDER BY appointment_time""",
+                        (business_id, date)
+                    )
+                else:
+                    cur.execute(
+                        """SELECT appointment_time FROM salon_appointments
+                           WHERE appointment_date = %s AND status = 'confirmed'
+                           ORDER BY appointment_time""",
+                        (date,)
+                    )
                 booked_times = [str(row[0])[:5] for row in cur.fetchall()]
 
-                # Suggest alternatives
-                all_slots = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00"]
-                available_alternatives = [t for t in all_slots if t not in booked_times][:4]
+                # Generate all available slots
+                all_slots = _get_slots_for_date(date, biz_context)
+                available_slots = [t for t in all_slots if t not in booked_times]
+
+                # Sort by proximity to requested time (BUG-002 FIX)
+                def time_to_minutes(t):
+                    h, m = map(int, t.split(':'))
+                    return h * 60 + m
+
+                requested_minutes = time_to_minutes(time)
+                available_slots.sort(key=lambda t: abs(time_to_minutes(t) - requested_minutes))
+
+                # Take the 4 closest alternatives
+                available_alternatives = available_slots[:4]
 
                 return {
                     "success": False,
@@ -1057,27 +1774,44 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                     "date": date,
                     "time": time,
                     "available_alternatives": available_alternatives,
-                    "message_en": f"Sorry, {time} on {date} is already booked. Available times: {', '.join(available_alternatives)}",
-                    "message_it": f"Mi dispiace, {time} del {date} è già prenotato. Orari disponibili: {', '.join(available_alternatives)}"
+                    "message": f"Sorry, {time} on {date} is already booked. Nearest available times: {', '.join(available_alternatives)}"
                 }
 
             # Create Google Calendar event first
+            business = biz_context["business"] if biz_context else None
             google_event_id = create_calendar_event(
                 customer_name=customer_name,
                 service=service,
                 date_str=date,
                 time_str=time,
-                customer_phone=normalized_phone
+                customer_phone=normalized_phone,
+                business=business,
+                operator_name=resolved_operator_name
             )
 
             # Create appointment with google_event_id
-            cur.execute(
-                """INSERT INTO salon_appointments
-                   (customer_phone, customer_name, service_type, appointment_date, appointment_time, duration_minutes, price, status, google_event_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'confirmed', %s)
-                   RETURNING id""",
-                (normalized_phone, customer_name, service_type, date, time, service["duration"], service["price"], google_event_id)
-            )
+            if business_id is not None:
+                cur.execute(
+                    """INSERT INTO appointments
+                       (business_id, operator_id, operator_name, customer_phone, customer_name,
+                        treatment_code, treatment_name,
+                        appointment_date, appointment_time, duration_minutes, price, status,
+                        google_event_id, platform)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s)
+                       RETURNING id""",
+                    (business_id, resolved_operator_id, resolved_operator_name,
+                     normalized_phone, customer_name, service_type,
+                     service.get("name_it", service_type), date, time,
+                     service["duration"], service["price"], google_event_id, platform)
+                )
+            else:
+                cur.execute(
+                    """INSERT INTO salon_appointments
+                       (customer_phone, customer_name, service_type, appointment_date, appointment_time, duration_minutes, price, status, google_event_id, platform)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s)
+                       RETURNING id""",
+                    (normalized_phone, customer_name, service_type, date, time, service["duration"], service["price"], google_event_id, platform)
+                )
 
             appointment_id = cur.fetchone()[0]
             conn.commit()
@@ -1085,7 +1819,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             calendar_note = " (synced to calendar)" if google_event_id else ""
             logger.info(f"✅ Appointment created: #{appointment_id} for {customer_name}{calendar_note}")
 
-            return {
+            result = {
                 "success": True,
                 "appointment_id": appointment_id,
                 "customer_name": customer_name,
@@ -1093,9 +1827,73 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                 "service_en": service.get('name_en', service_type),
                 "date": date,
                 "time": time,
-                "price": service['price'],
                 "calendar_synced": bool(google_event_id)
             }
+            if resolved_operator_name:
+                result["operator_name"] = resolved_operator_name
+
+            # --- Auto-addon: book follow-up treatment if configured ---
+            addon = service.get("auto_addon") if service else None
+            if addon and biz_context:
+                try:
+                    main_end = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M") + timedelta(minutes=service["duration"])
+                    addon_time = main_end.strftime("%H:%M")
+                    addon_service = biz_context["services"].get(addon["code"])
+                    if addon_service:
+                        # Find operator enabled for the addon treatment (may differ from main)
+                        addon_op_id = resolved_operator_id
+                        addon_op_name = resolved_operator_name
+                        addon_operators = biz_context.get("operators", [])
+                        logger.info(f"🔍 Addon check: addon_code={addon['code']}, main_op_id={addon_op_id}, operators_count={len(addon_operators)}")
+                        if addon_operators and addon_op_id:
+                            # Check if main operator can do addon
+                            main_op = next((op for op in addon_operators if op["id"] == addon_op_id), None)
+                            if main_op:
+                                logger.info(f"🔍 Main op {main_op['display_name']} treatments: {main_op.get('treatments', [])}, addon_code='{addon['code']}', match={addon['code'] in main_op.get('treatments', [])}")
+                            if main_op and addon["code"] not in main_op.get("treatments", []):
+                                # Main operator can't do addon — find one who can and is free
+                                for op in addon_operators:
+                                    if addon["code"] in op.get("treatments", []):
+                                        addon_op_id = op["id"]
+                                        addon_op_name = op["display_name"]
+                                        break
+                        addon_event_id = create_calendar_event(
+                            customer_name=customer_name, service=addon_service,
+                            date_str=date, time_str=addon_time,
+                            customer_phone=normalized_phone,
+                            business=biz_context.get("business"),
+                            operator_name=addon_op_name,
+                        )
+                        cur2 = conn.cursor()
+                        cur2.execute(
+                            """INSERT INTO appointments
+                               (business_id, operator_id, operator_name, customer_phone, customer_name,
+                                treatment_code, treatment_name,
+                                appointment_date, appointment_time, duration_minutes, price, status,
+                                google_event_id, platform, is_auto_addon, parent_appointment_id)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s, TRUE, %s)
+                               RETURNING id""",
+                            (business_id, addon_op_id, addon_op_name,
+                             normalized_phone, customer_name, addon["code"],
+                             addon["name_it"], date, addon_time,
+                             addon["duration"], addon["price"], addon_event_id, platform,
+                             appointment_id)
+                        )
+                        addon_appt_id = cur2.fetchone()[0]
+                        conn.commit()
+                        result["auto_addon"] = {
+                            "appointment_id": addon_appt_id,
+                            "service": addon["name_it"],
+                            "time": addon_time,
+                            "duration": addon["duration"],
+                            "price": addon["price"],
+                        }
+                        result["total_duration"] = service["duration"] + addon["duration"]
+                        logger.info(f"✅ Auto-addon #{addon_appt_id} ({addon['name_it']}) at {addon_time}")
+                except Exception as e:
+                    logger.error(f"⚠️ Auto-addon failed (main OK): {e}")
+
+            return result
         finally:
             conn.close()
 
@@ -1112,26 +1910,203 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
         logger.error(f"❌ Create appointment error: {e}")
         return {"success": False, "error": "BOOKING_ERROR", "details": str(e)}
 
-def check_availability(date: str, time: str) -> Dict[str, Any]:
-    """Check if a time slot is available"""
+def check_availability(date: str, time: str, business_id: int = None, biz_context: dict = None,
+                       operator_name: str = None, treatment_code: str = None) -> Dict[str, Any]:
+    """Check if a time slot is available. If not, suggest nearest alternatives.
+
+    Bug #2 fix: when treatment_code provided, also validates appt end time
+    does not exceed salon close_time (factoring auto-addon duration).
+    """
     try:
+        operators = biz_context.get("operators", []) if biz_context else []
+
+        # --- Bug #2: closing-time check ---
+        if treatment_code and biz_context:
+            services = biz_context.get("services") or {}
+            hours = biz_context.get("hours") or {}
+            svc = services.get(treatment_code)
+            if svc:
+                total_min = int(svc.get("duration", 0))
+                addon = svc.get("auto_addon")
+                if addon:
+                    total_min += int(addon.get("duration", 0))
+                try:
+                    from datetime import datetime as _dt2, timedelta as _td2
+                    start_dt = _dt2.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+                    end_dt = start_dt + _td2(minutes=total_min)
+                    dow = start_dt.weekday()
+                    day_hours = hours.get(dow) or hours.get(str(dow))
+                    if day_hours and day_hours.get("is_open") is False:
+                        return {
+                            "success": True,
+                            "available": False,
+                            "date": date,
+                            "time": time,
+                            "reason": "salon_closed_day",
+                            "message": f"Il salone e' chiuso quel giorno."
+                        }
+                    if day_hours and day_hours.get("close_time"):
+                        close_str = day_hours["close_time"]
+                        close_dt = _dt2.strptime(f"{date} {close_str}", "%Y-%m-%d %H:%M")
+                        if end_dt > close_dt:
+                            return {
+                                "success": True,
+                                "available": False,
+                                "date": date,
+                                "time": time,
+                                "reason": "exceeds_closing",
+                                "total_duration_minutes": total_min,
+                                "salon_close_time": close_str,
+                                "appointment_end_time": end_dt.strftime("%H:%M"),
+                                "message": (
+                                    f"Il trattamento dura {total_min} min e finirebbe alle "
+                                    f"{end_dt.strftime('%H:%M')}, ma chiudiamo alle {close_str}. "
+                                    f"Serve un orario piu' presto."
+                                )
+                            }
+                    if day_hours and day_hours.get("open_time"):
+                        open_str = day_hours["open_time"]
+                        open_dt = _dt2.strptime(f"{date} {open_str}", "%Y-%m-%d %H:%M")
+                        if start_dt < open_dt:
+                            return {
+                                "success": True,
+                                "available": False,
+                                "date": date,
+                                "time": time,
+                                "reason": "before_opening",
+                                "salon_open_time": open_str,
+                                "message": f"Apriamo alle {open_str}."
+                            }
+                except Exception as _e_close:
+                    logger.warning(f"close-time check failed: {_e_close}")
+        # --- end Bug #2 ---
+
+        # --- Bug #4: compute requested duration for overlap checks ---
+        _req_duration = 60  # safe default
+        if treatment_code and biz_context:
+            _svc = (biz_context.get("services") or {}).get(treatment_code)
+            if _svc:
+                _req_duration = int(_svc.get("duration") or 60)
+                _addon = _svc.get("auto_addon")
+                if _addon:
+                    _req_duration += int(_addon.get("duration") or 0)
+        # --- end Bug #4 setup ---
+
         conn = get_db_connection()
         try:
             cur = conn.cursor()
-            cur.execute(
-                """SELECT COUNT(*) FROM salon_appointments
-                   WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                (date, time)
-            )
-            count = cur.fetchone()[0]
-            available = count == 0
+            if business_id is not None:
+                if operator_name and operators:
+                    # Specific operator: check per-operator
+                    op_result = resolve_operator(operator_name, "", operators)
+                    if not op_result["success"]:
+                        return {"success": False, **op_result}
+                    op_id = op_result["operator_id"]
+                    # Bug #4: interval overlap, not exact-time match
+                    cur.execute(
+                        """SELECT COUNT(*) FROM appointments
+                           WHERE business_id = %s AND operator_id = %s
+                                 AND appointment_date = %s AND status = 'confirmed'
+                                 AND appointment_time < (%s::time + (%s || ' minutes')::interval)
+                                 AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
+                        (business_id, op_id, date, time, _req_duration, time)
+                    )
+                    count = cur.fetchone()[0]
+                    available = count == 0
+                elif operators and not operator_name:
+                    # No preference + operators exist: available if not ALL operators booked
+                    # Bug #4: count operators with overlapping appts
+                    cur.execute(
+                        """SELECT COUNT(DISTINCT operator_id) FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                                 AND appointment_time < (%s::time + (%s || ' minutes')::interval)
+                                 AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
+                        (business_id, date, time, _req_duration, time)
+                    )
+                    booked_count = cur.fetchone()[0]
+                    available = booked_count < len(operators)
+                    _no_pref_operator = None
+                    if available:
+                        _op_ids = [op["id"] for op in operators]
+                        # Bug #4: NOT EXISTS interval overlap
+                        cur.execute(
+                            """SELECT o.id, o.display_name FROM operators o
+                               WHERE o.id = ANY(%s)
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM appointments ap
+                                     WHERE ap.business_id = %s AND ap.operator_id = o.id
+                                       AND ap.appointment_date = %s AND ap.status = 'confirmed'
+                                       AND ap.appointment_time < (%s::time + (%s || ' minutes')::interval)
+                                       AND (ap.appointment_time + (COALESCE(ap.duration_minutes, 60) || ' minutes')::interval) > %s::time
+                                 )
+                               ORDER BY o.sort_order LIMIT 1""",
+                            (_op_ids, business_id, date, time, _req_duration, time)
+                        )
+                        _free_op = cur.fetchone()
+                        if _free_op:
+                            _no_pref_operator = _free_op[1]
+                else:
+                    # No operators configured: legacy global check (Bug #4: interval overlap)
+                    cur.execute(
+                        """SELECT COUNT(*) FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                                 AND appointment_time < (%s::time + (%s || ' minutes')::interval)
+                                 AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
+                        (business_id, date, time, _req_duration, time)
+                    )
+                    count = cur.fetchone()[0]
+                    available = count == 0
+            else:
+                cur.execute(
+                    """SELECT COUNT(*) FROM salon_appointments
+                       WHERE appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
+                    (date, time)
+                )
+                count = cur.fetchone()[0]
+                available = count == 0
 
-            return {
+            result = {
                 "success": True,
                 "available": available,
                 "date": date,
                 "time": time
             }
+            # Include free operator name so AI doesn't hallucinate one
+            if locals().get("_no_pref_operator"):
+                result["assigned_operator"] = _no_pref_operator
+
+            # If not available, suggest nearest alternatives (BUG-001/BUG-002 enhancement)
+            if not available:
+                if business_id is not None:
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'""",
+                        (business_id, date)
+                    )
+                else:
+                    cur.execute(
+                        """SELECT appointment_time FROM salon_appointments
+                           WHERE appointment_date = %s AND status = 'confirmed'""",
+                        (date,)
+                    )
+                booked_times = set(str(row[0])[:5] for row in cur.fetchall())
+
+                # Generate all available slots
+                all_slots = _get_slots_for_date(date, biz_context)
+                available_slots = [t for t in all_slots if t not in booked_times]
+
+                # Sort by proximity to requested time
+                def time_to_minutes(t):
+                    h, m = map(int, t.split(':'))
+                    return h * 60 + m
+
+                requested_minutes = time_to_minutes(time)
+                available_slots.sort(key=lambda t: abs(time_to_minutes(t) - requested_minutes))
+
+                result["nearest_alternatives"] = available_slots[:4]
+                result["message"] = f"The slot {time} is not available. Nearest available: {', '.join(available_slots[:4])}"
+
+            return result
         finally:
             conn.close()
 
@@ -1146,7 +2121,7 @@ def format_time_12h(time_str: str) -> str:
     except:
         return str(time_str)[:5]
 
-def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
+def get_customer_appointments(customer_phone: str, business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """Get all FUTURE appointments for a customer (filters out past appointments)"""
     try:
         # Normalize phone
@@ -1155,35 +2130,63 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
         phone_display = f"***{normalized_phone[-4:]}" if len(normalized_phone) >= 4 else normalized_phone
         now = datetime.now()
         today = now.date()
+        current_time = now.strftime("%H:%M")
 
         conn = get_db_connection()
         try:
             cur = conn.cursor()
             # Only get future appointments (today with future time, or future dates)
-            cur.execute(
-                """SELECT id, customer_name, service_type, appointment_date, appointment_time, price, status
-                   FROM salon_appointments
-                   WHERE customer_phone = %s AND status = 'confirmed'
-                   AND (appointment_date > %s OR (appointment_date = %s AND appointment_time > %s))
-                   ORDER BY appointment_date, appointment_time""",
-                (normalized_phone, today, today, now.strftime("%H:%M"))
-            )
+            if business_id is not None:
+                # Bug #7: hide auto-addon entries — they roll up under their parent
+                cur.execute(
+                    """SELECT id, customer_name, treatment_code, appointment_date, appointment_time,
+                              price, status, google_event_id
+                       FROM appointments
+                       WHERE business_id = %s AND customer_phone = %s AND status = 'confirmed'
+                       AND COALESCE(is_auto_addon, FALSE) = FALSE
+                       AND (appointment_date > %s OR (appointment_date = %s AND appointment_time > %s))
+                       ORDER BY appointment_date, appointment_time""",
+                    (business_id, normalized_phone, today, today, current_time)
+                )
+            else:
+                cur.execute(
+                    """SELECT id, customer_name, service_type, appointment_date, appointment_time, price, status, google_event_id
+                       FROM salon_appointments
+                       WHERE customer_phone = %s AND status = 'confirmed'
+                       AND (appointment_date > %s OR (appointment_date = %s AND appointment_time > %s))
+                       ORDER BY appointment_date, appointment_time""",
+                    (normalized_phone, today, today, current_time)
+                )
+
+            services = biz_context["services"] if biz_context else SALON_SERVICES
 
             appointments = []
             for idx, row in enumerate(cur.fetchall(), 1):
-                service = SALON_SERVICES.get(row[2], {})
-                apt_id = row[0]
-                appointments.append({
-                    "appointment_id": apt_id,  # ⚠️ USE THIS ID for modify_appointment and cancel_appointment
-                    "booked_name": row[1],  # Name given when booking
+                service = services.get(row[2], {})
+                time_24h = str(row[4])[:5]  # HH:MM format for function calls
+                # Bug #7: surface addon info if parent has one (so AI says "Taglio Donna include Piega")
+                addon_info = None
+                _addon_obj = service.get("auto_addon") if isinstance(service, dict) else None
+                if _addon_obj:
+                    addon_info = {
+                        "name_it": _addon_obj.get("name_it"),
+                        "duration": _addon_obj.get("duration"),
+                    }
+                _appt = {
+                    "customer_name": row[1],
                     "service_code": row[2],
                     "service_en": service.get("name_en", row[2]),
                     "service_it": service.get("name_it", row[2]),
                     "date": str(row[3]),
                     "time": format_time_12h(row[4]),
+                    "time_24h": time_24h,
                     "price": float(row[5]) if row[5] else 0,
-                    "status": row[6]
-                })
+                    "status": row[6],
+                    "google_event_id": row[7]
+                }
+                if addon_info:
+                    _appt["includes_addon"] = addon_info
+                appointments.append(_appt)
 
             if not appointments:
                 return {
@@ -1196,7 +2199,6 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
             return {
                 "success": True,
                 "your_phone": phone_display,
-                "note": "IMPORTANT: Use 'appointment_id' (not any other number) when calling modify_appointment or cancel_appointment",
                 "appointments": appointments,
                 "count": len(appointments)
             }
@@ -1206,50 +2208,106 @@ def get_customer_appointments(customer_phone: str) -> Dict[str, Any]:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def cancel_appointment(customer_phone: str, appointment_id: int) -> Dict[str, Any]:
-    """Cancel an appointment"""
+def cancel_appointment(customer_phone: str, customer_name: str, date: str, time: str,
+                       business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
+    """Cancel an appointment by customer name, date, and time (no ID needed)"""
     try:
         # Normalize phone
         normalized_phone = normalize_phone(customer_phone)
+
+        # Normalize time to HH:MM format
+        normalized_time = time
+        if time and len(time) == 4 and ':' not in time:
+            normalized_time = f"{time[:2]}:{time[2:]}"
 
         conn = get_db_connection()
         try:
             cur = conn.cursor()
 
-            # Verify appointment belongs to customer and get google_event_id
-            cur.execute(
-                """SELECT id, google_event_id FROM salon_appointments
-                   WHERE id = %s AND customer_phone = %s AND status = 'confirmed'""",
-                (appointment_id, normalized_phone)
-            )
+            # Find appointment by phone + date + time (phone is authoritative; name can change)
+            if business_id is not None:
+                cur.execute(
+                    """SELECT id, google_event_id, customer_name, appointment_date, appointment_time
+                       FROM appointments
+                       WHERE business_id = %s AND customer_phone = %s
+                       AND appointment_date = %s AND appointment_time = %s
+                       AND status = 'confirmed'
+                       AND COALESCE(is_auto_addon, FALSE) = FALSE""",
+                    (business_id, normalized_phone, date, normalized_time)
+                )
+            else:
+                cur.execute(
+                    """SELECT id, google_event_id, customer_name, appointment_date, appointment_time
+                       FROM salon_appointments
+                       WHERE customer_phone = %s
+                       AND LOWER(customer_name) LIKE %s
+                       AND appointment_date = %s
+                       AND appointment_time = %s
+                       AND status = 'confirmed'""",
+                    (normalized_phone, f"%{customer_name.lower()}%", date, normalized_time)
+                )
 
             row = cur.fetchone()
             if not row:
                 return {
                     "success": False,
                     "error": "APPOINTMENT_NOT_FOUND",
-                    "appointment_id": appointment_id
+                    "searched_for": {
+                        "customer_name": customer_name,
+                        "date": date,
+                        "time": time
+                    },
+                    "hint": "No matching appointment found. Check the name, date, and time."
                 }
 
+            appointment_id = row[0]
             google_event_id = row[1]
+            found_name = row[2]
+            found_date = str(row[3])
+            found_time = str(row[4])
 
             # Delete from Google Calendar
             if google_event_id:
-                delete_calendar_event(google_event_id)
+                business = biz_context["business"] if biz_context else None
+                delete_calendar_event(google_event_id, business=business)
 
-            # Cancel appointment
-            cur.execute(
-                "UPDATE salon_appointments SET status = 'cancelled' WHERE id = %s",
-                (appointment_id,)
-            )
+            # Cancel appointment + poison-pill reminder_sent_at to stop future reminders
+            if business_id is not None:
+                cur.execute(
+                    """UPDATE appointments SET status = 'cancelled', reminder_sent_at = NOW()
+                       WHERE id = %s""",
+                    (appointment_id,)
+                )
+                # Cancel any auto-addon child appointments
+                cur.execute(
+                    """UPDATE appointments SET status = 'cancelled', reminder_sent_at = NOW()
+                       WHERE parent_appointment_id = %s AND status = 'confirmed'
+                       RETURNING id, google_event_id""",
+                    (appointment_id,)
+                )
+                addon_rows = cur.fetchall()
+                for addon_row in addon_rows:
+                    if addon_row[1]:
+                        try:
+                            delete_calendar_event(addon_row[1], business=biz_context.get("business") if biz_context else None)
+                        except Exception as _e_cal:
+                            logger.warning(f"Failed deleting addon calendar event: {_e_cal}")
+                if addon_rows:
+                    logger.info(f"✅ Cascaded cancel to {len(addon_rows)} auto-addon(s)")
+            else:
+                cur.execute("UPDATE salon_appointments SET status = 'cancelled' WHERE id = %s", (appointment_id,))
             conn.commit()
 
             calendar_note = " (removed from calendar)" if google_event_id else ""
-            logger.info(f"✅ Appointment #{appointment_id} cancelled{calendar_note}")
+            logger.info(f"✅ Appointment #{appointment_id} for {found_name} cancelled{calendar_note}")
 
             return {
                 "success": True,
-                "cancelled_appointment_id": appointment_id,
+                "cancelled_appointment": {
+                    "customer_name": found_name,
+                    "date": found_date,
+                    "time": found_time
+                },
                 "calendar_updated": bool(google_event_id)
             }
         finally:
@@ -1260,64 +2318,98 @@ def cancel_appointment(customer_phone: str, appointment_id: int) -> Dict[str, An
 
 def modify_appointment(
     customer_phone: str,
-    appointment_id: int,
+    customer_name: str,
+    current_date: str,
+    current_time: str,
     new_date: str = None,
     new_time: str = None,
-    new_service: str = None
+    new_service: str = None,
+    business_id: int = None,
+    biz_context: dict = None,
+    new_operator: str = None
 ) -> Dict[str, Any]:
     """
-    Modify an existing appointment.
+    Modify an existing appointment by customer name, date, and time (no ID needed).
     Can change date, time, service, or any combination.
     """
     try:
         # Normalize phone
         normalized_phone = normalize_phone(customer_phone)
 
+        # Normalize current_time to HH:MM format
+        normalized_current_time = current_time
+        if current_time and len(current_time) == 4 and ':' not in current_time:
+            normalized_current_time = f"{current_time[:2]}:{current_time[2:]}"
+
+        name_pattern = f"%{customer_name.lower()}%"
+
         conn = get_db_connection()
         try:
             cur = conn.cursor()
 
-            # Find the appointment
-            cur.execute(
-                """SELECT id, customer_name, service_type, appointment_date, appointment_time, google_event_id
-                   FROM salon_appointments
-                   WHERE id = %s AND customer_phone = %s AND status = 'confirmed'""",
-                (appointment_id, normalized_phone)
-            )
+            # Find the appointment by name + date + time (fuzzy match on name)
+            if business_id is not None:
+                cur.execute(
+                    """SELECT id, customer_name, treatment_code, appointment_date, appointment_time, google_event_id
+                       FROM appointments
+                       WHERE business_id = %s AND customer_phone = %s
+                       AND LOWER(customer_name) LIKE %s
+                       AND appointment_date = %s AND appointment_time = %s
+                       AND status = 'confirmed'""",
+                    (business_id, normalized_phone, name_pattern, current_date, normalized_current_time)
+                )
+            else:
+                cur.execute(
+                    """SELECT id, customer_name, service_type, appointment_date, appointment_time, google_event_id
+                       FROM salon_appointments
+                       WHERE customer_phone = %s
+                       AND LOWER(customer_name) LIKE %s
+                       AND appointment_date = %s
+                       AND appointment_time = %s
+                       AND status = 'confirmed'""",
+                    (normalized_phone, name_pattern, current_date, normalized_current_time)
+                )
 
             appointment = cur.fetchone()
             if not appointment:
                 return {
                     "success": False,
                     "error": "APPOINTMENT_NOT_FOUND",
-                    "appointment_id": appointment_id
+                    "searched_for": {
+                        "customer_name": customer_name,
+                        "date": current_date,
+                        "time": current_time
+                    },
+                    "hint": "No matching appointment found. Check the name, date, and time."
                 }
 
-            # Current values
-            current_name = appointment[1]
-            current_service = appointment[2]
-            current_date = str(appointment[3])
-            current_time = str(appointment[4])[:5]  # HH:MM format
+            # Get values from database
+            appointment_id = appointment[0]  # ID for internal use only
+            db_name = appointment[1]
+            db_service = appointment[2]
+            db_date = str(appointment[3])
+            db_time = str(appointment[4])[:5]  # HH:MM format
             google_event_id = appointment[5]
 
-            # Determine new values (use current if not provided)
-            final_date = new_date if new_date else current_date
-            final_time = new_time if new_time else current_time
-            final_service = new_service.lower() if new_service else current_service
+            # Determine new values (use database values if not provided)
+            final_date = new_date if new_date else db_date
+            final_time = new_time if new_time else db_time
+            final_service = new_service.lower() if new_service else db_service
 
             # Validate new service ONLY if being changed
+            services = biz_context["services"] if biz_context else SALON_SERVICES
             if new_service:
-                service = SALON_SERVICES.get(final_service)
+                service = services.get(final_service)
                 if not service:
                     return {
                         "success": False,
                         "error": "INVALID_SERVICE",
                         "provided": final_service,
-                        "valid_services": list(SALON_SERVICES.keys())
+                        "valid_services": list(services.keys())
                     }
             else:
                 # Keep existing service - get it for duration/price or use defaults
-                service = SALON_SERVICES.get(final_service, {"duration": 45, "price": 35, "name_it": final_service})
+                service = services.get(final_service, {"duration": 45, "price": 35, "name_it": final_service})
 
             # Validate new date and time together (check if in the past)
             try:
@@ -1328,25 +2420,54 @@ def modify_appointment(
                 return {"success": False, "error": "INVALID_DATE_TIME_FORMAT", "provided_date": final_date, "provided_time": final_time}
 
             # Validate business hours, closed days, and holidays
-            business_validation = validate_business_day_and_time(final_date, final_time)
+            if biz_context:
+                business_validation = validate_day_and_time(final_date, final_time, biz_context["hours"], biz_context["closures"])
+            else:
+                business_validation = validate_business_day_and_time(final_date, final_time)
             if not business_validation["valid"]:
                 return {
                     "success": False,
                     "error": business_validation["error_code"],
                     "message": business_validation["error"],
-                    "message_it": business_validation.get("error_it", ""),
                     "date": final_date,
                     "time": final_time
                 }
 
+            # Resolve new operator if provided
+            resolved_operator_id = None
+            resolved_operator_name = None
+            if new_operator and new_operator.strip() and biz_context:
+                operators = biz_context.get("operators", [])
+                op_result = resolve_operator(new_operator, final_service, operators)
+                if not op_result["success"]:
+                    return {"success": False, **op_result}
+                resolved_operator_id = op_result.get("operator_id")
+                resolved_operator_name = op_result.get("operator_name")
+
             # Check if new slot is available (only if date or time changed)
             if new_date or new_time:
-                cur.execute(
-                    """SELECT COUNT(*) FROM salon_appointments
-                       WHERE appointment_date = %s AND appointment_time = %s
-                       AND status = 'confirmed' AND id != %s""",
-                    (final_date, final_time, appointment_id)
-                )
+                if business_id is not None:
+                    if resolved_operator_id is not None:
+                        cur.execute(
+                            """SELECT COUNT(*) FROM appointments
+                               WHERE business_id = %s AND operator_id = %s AND appointment_date = %s AND appointment_time = %s
+                               AND status = 'confirmed' AND id != %s""",
+                            (business_id, resolved_operator_id, final_date, final_time, appointment_id)
+                        )
+                    else:
+                        cur.execute(
+                            """SELECT COUNT(*) FROM appointments
+                               WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s
+                               AND status = 'confirmed' AND id != %s""",
+                            (business_id, final_date, final_time, appointment_id)
+                        )
+                else:
+                    cur.execute(
+                        """SELECT COUNT(*) FROM salon_appointments
+                           WHERE appointment_date = %s AND appointment_time = %s
+                           AND status = 'confirmed' AND id != %s""",
+                        (final_date, final_time, appointment_id)
+                    )
                 if cur.fetchone()[0] > 0:
                     return {
                         "success": False,
@@ -1356,25 +2477,49 @@ def modify_appointment(
                     }
 
             # Update the appointment
-            cur.execute(
-                """UPDATE salon_appointments
-                   SET appointment_date = %s, appointment_time = %s, service_type = %s,
-                       duration_minutes = %s, price = %s
-                   WHERE id = %s""",
-                (final_date, final_time, final_service, service["duration"], service["price"], appointment_id)
-            )
+            if business_id is not None:
+                if resolved_operator_id is not None:
+                    cur.execute(
+                        """UPDATE appointments
+                           SET appointment_date = %s, appointment_time = %s, treatment_code = %s,
+                               treatment_name = %s, duration_minutes = %s, price = %s,
+                               operator_id = %s, operator_name = %s
+                           WHERE id = %s""",
+                        (final_date, final_time, final_service, service.get("name_it", final_service),
+                         service["duration"], service["price"], resolved_operator_id, resolved_operator_name, appointment_id)
+                    )
+                else:
+                    cur.execute(
+                        """UPDATE appointments
+                           SET appointment_date = %s, appointment_time = %s, treatment_code = %s,
+                               treatment_name = %s, duration_minutes = %s, price = %s
+                           WHERE id = %s""",
+                        (final_date, final_time, final_service, service.get("name_it", final_service),
+                         service["duration"], service["price"], appointment_id)
+                    )
+            else:
+                cur.execute(
+                    """UPDATE salon_appointments
+                       SET appointment_date = %s, appointment_time = %s, service_type = %s,
+                           duration_minutes = %s, price = %s
+                       WHERE id = %s""",
+                    (final_date, final_time, final_service, service["duration"], service["price"], appointment_id)
+                )
 
             conn.commit()
 
             # Update Google Calendar event
             if google_event_id:
+                business = biz_context["business"] if biz_context else None
                 update_calendar_event(
                     event_id=google_event_id,
-                    customer_name=current_name,
+                    customer_name=db_name,
                     service=service,
                     date_str=final_date,
                     time_str=final_time,
-                    customer_phone=normalized_phone
+                    customer_phone=normalized_phone,
+                    business=business,
+                    operator_name=resolved_operator_name
                 )
 
             calendar_note = " (calendar updated)" if google_event_id else ""
@@ -1382,17 +2527,18 @@ def modify_appointment(
 
             # Build change details
             changes = {}
-            if new_date and new_date != current_date:
-                changes["date"] = {"from": current_date, "to": final_date}
-            if new_time and new_time != current_time:
-                changes["time"] = {"from": current_time, "to": final_time}
-            if new_service and new_service.lower() != current_service.lower():
-                changes["service"] = {"from": current_service, "to": final_service}
+            if new_date and new_date != db_date:
+                changes["date"] = {"from": db_date, "to": final_date}
+            if new_time and new_time != db_time:
+                changes["time"] = {"from": db_time, "to": final_time}
+            if new_service and new_service.lower() != db_service.lower():
+                changes["service"] = {"from": db_service, "to": final_service}
+            if resolved_operator_name:
+                changes["operator"] = {"to": resolved_operator_name}
 
-            return {
+            result = {
                 "success": True,
-                "appointment_id": appointment_id,
-                "customer_name": current_name,
+                "customer_name": db_name,
                 "service": service['name_it'],
                 "service_en": service.get('name_en', final_service),
                 "new_date": final_date,
@@ -1400,6 +2546,9 @@ def modify_appointment(
                 "changes": changes,
                 "calendar_updated": bool(google_event_id)
             }
+            if resolved_operator_name:
+                result["operator_name"] = resolved_operator_name
+            return result
         finally:
             conn.close()
 
@@ -1414,14 +2563,18 @@ def modify_appointment(
         logger.error(f"❌ Modify appointment error: {e}")
         return {"success": False, "error": "MODIFICATION_ERROR", "details": str(e)}
 
-def get_available_slots(date: str) -> Dict[str, Any]:
+def get_available_slots(date: str, business_id: int = None, biz_context: dict = None,
+                        operator_name: str = None) -> Dict[str, Any]:
     """
     Get available time slots for a specific date.
     Returns 30-minute slots during business hours that are not booked.
-    Business hours: Tue-Fri 9:00-18:00, Sat 9:00-17:00
-    Closed: Monday, Sunday, Dec 25, Jan 1
+    Business hours: Tue-Fri 9:00-18:00, Sat 9:00-17:00 (legacy)
+    Multi-tenant: uses biz_context hours
+    Closed: Monday, Sunday, Dec 25, Jan 1 (legacy)
     """
     try:
+        operators = biz_context.get("operators", []) if biz_context else []
+
         # Validate date
         try:
             parsed_date = datetime.strptime(date, "%Y-%m-%d")
@@ -1433,7 +2586,10 @@ def get_available_slots(date: str) -> Dict[str, Any]:
             return {"success": False, "error": "INVALID_DATE_FORMAT", "provided_date": date}
 
         # Check if it's a closed day (without time validation)
-        business_validation = validate_business_day_and_time(date, None)
+        if biz_context:
+            business_validation = validate_day_and_time(date, None, biz_context["hours"], biz_context["closures"])
+        else:
+            business_validation = validate_business_day_and_time(date, None)
         if not business_validation["valid"]:
             return {
                 "success": True,  # Success but no slots
@@ -1441,37 +2597,68 @@ def get_available_slots(date: str) -> Dict[str, Any]:
                 "available_slots": [],
                 "count": 0,
                 "closed": True,
-                "reason": business_validation["error"],
-                "reason_it": business_validation.get("error_it", "")
+                "reason": business_validation["error"]
             }
-
-        # Determine closing hour based on day
-        weekday = parsed_date.weekday()
-        closing_hour = 17 if weekday == 5 else 18  # Saturday: 17:00, others: 18:00
 
         conn = get_db_connection()
         try:
             cur = conn.cursor()
 
             # Get all booked times for this date
-            cur.execute(
-                """SELECT appointment_time FROM salon_appointments
-                   WHERE appointment_date = %s AND status = 'confirmed'""",
-                (date,)
-            )
+            if business_id is not None:
+                if operator_name and operators:
+                    # Specific operator: only count slots booked for that operator
+                    op_result = resolve_operator(operator_name, "", operators)
+                    if not op_result["success"]:
+                        return {"success": False, **op_result}
+                    op_id = op_result["operator_id"]
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND operator_id = %s AND appointment_date = %s AND status = 'confirmed'""",
+                        (business_id, op_id, date)
+                    )
+                    booked_times = set()
+                    for row in cur.fetchall():
+                        booked_times.add(str(row[0])[:5])
 
-            booked_times = set()
-            for row in cur.fetchall():
-                # Store as HH:MM string
-                booked_times.add(str(row[0])[:5])
+                elif operators and not operator_name:
+                    # No preference + operators exist: slot is "fully booked" only when ALL operators are booked
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                                 AND operator_id IS NOT NULL
+                           GROUP BY appointment_time
+                           HAVING COUNT(DISTINCT operator_id) >= %s""",
+                        (business_id, date, len(operators))
+                    )
+                    booked_times = set()
+                    for row in cur.fetchall():
+                        booked_times.add(str(row[0])[:5])
+
+                else:
+                    # No operators configured: legacy global query
+                    cur.execute(
+                        """SELECT appointment_time FROM appointments
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'""",
+                        (business_id, date)
+                    )
+                    booked_times = set()
+                    for row in cur.fetchall():
+                        booked_times.add(str(row[0])[:5])
+            else:
+                cur.execute(
+                    """SELECT appointment_time FROM salon_appointments
+                       WHERE appointment_date = %s AND status = 'confirmed'""",
+                    (date,)
+                )
+                booked_times = set()
+                for row in cur.fetchall():
+                    booked_times.add(str(row[0])[:5])
         finally:
             conn.close()
 
         # Generate all possible slots based on business hours
-        all_slots = []
-        for hour in range(9, closing_hour):
-            all_slots.append(f"{hour:02d}:00")
-            all_slots.append(f"{hour:02d}:30")
+        all_slots = _get_slots_for_date(date, biz_context, parsed_date=parsed_date)
 
         # Filter out booked slots
         available_slots = [slot for slot in all_slots if slot not in booked_times]
@@ -1506,6 +2693,7 @@ def get_available_slots(date: str) -> Dict[str, Any]:
 # Using strict mode for guaranteed schema compliance
 # ============================================================================
 
+# DEPRECATED: Legacy fallback for Aura. Multi-tenant uses build_booking_tools() from business_context.
 BOOKING_TOOLS = [
     {
         "type": "function",
@@ -1527,7 +2715,7 @@ BOOKING_TOOLS = [
                     },
                     "date": {
                         "type": "string",
-                        "description": f"Appointment date in YYYY-MM-DD format. Today is {TODAY}, tomorrow is {TOMORROW}"
+                        "description": "Appointment date in YYYY-MM-DD format"
                     },
                     "time": {
                         "type": "string",
@@ -1543,7 +2731,7 @@ BOOKING_TOOLS = [
         "type": "function",
         "function": {
             "name": "check_availability",
-            "description": "Check if a specific date and time slot is available for booking.",
+            "description": "Check if a specific date and time slot is available for booking. ALWAYS pass treatment_code so the system can validate the appointment fits within salon hours (factoring duration + auto-addon).",
             "strict": True,
             "parameters": {
                 "type": "object",
@@ -1555,9 +2743,17 @@ BOOKING_TOOLS = [
                     "time": {
                         "type": "string",
                         "description": "Time in HH:MM 24h format"
+                    },
+                    "treatment_code": {
+                        "type": ["string", "null"],
+                        "description": "Treatment code (e.g. 'taglio_donna'). REQUIRED to validate the appointment does not exceed closing time."
+                    },
+                    "operator_name": {
+                        "type": ["string", "null"],
+                        "description": "Optional preferred operator name."
                     }
                 },
-                "required": ["date", "time"],
+                "required": ["date", "time", "treatment_code", "operator_name"],
                 "additionalProperties": False
             }
         }
@@ -1580,17 +2776,25 @@ BOOKING_TOOLS = [
         "type": "function",
         "function": {
             "name": "cancel_appointment",
-            "description": "Cancel an appointment. Use the 'id' field from get_customer_appointments result.",
+            "description": "Cancel an appointment by customer name, date, and time. No ID needed - just use the appointment details.",
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "appointment_id": {
-                        "type": "integer",
-                        "description": "The 'id' field from get_customer_appointments result"
+                    "customer_name": {
+                        "type": "string",
+                        "description": "The customer's name (e.g., 'Sarah', 'Maria Verdi')"
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "The appointment date in YYYY-MM-DD format"
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": "The appointment time in HH:MM 24h format (e.g., '15:00' for 3 PM)"
                     }
                 },
-                "required": ["appointment_id"],
+                "required": ["customer_name", "date", "time"],
                 "additionalProperties": False
             }
         }
@@ -1599,18 +2803,26 @@ BOOKING_TOOLS = [
         "type": "function",
         "function": {
             "name": "modify_appointment",
-            "description": "Modify/reschedule an appointment. Use the 'id' field from get_customer_appointments result.",
+            "description": "Modify/reschedule an appointment by customer name, date, and time. No ID needed - just use the appointment details.",
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "appointment_id": {
-                        "type": "integer",
-                        "description": "The 'id' field from get_customer_appointments result"
+                    "customer_name": {
+                        "type": "string",
+                        "description": "The customer's name (e.g., 'Sarah', 'Maria Verdi')"
+                    },
+                    "current_date": {
+                        "type": "string",
+                        "description": "The CURRENT appointment date in YYYY-MM-DD format"
+                    },
+                    "current_time": {
+                        "type": "string",
+                        "description": "The CURRENT appointment time in HH:MM 24h format (e.g., '15:00' for 3 PM)"
                     },
                     "new_date": {
                         "type": ["string", "null"],
-                        "description": f"New date in YYYY-MM-DD format. Today is {TODAY}, tomorrow is {TOMORROW}. Use null if not changing date."
+                        "description": "New date in YYYY-MM-DD format. Use null if not changing date."
                     },
                     "new_time": {
                         "type": ["string", "null"],
@@ -1622,7 +2834,7 @@ BOOKING_TOOLS = [
                         "enum": ["taglio_donna", "taglio_uomo", "piega", "colore_base", "balayage", "trattamento_ristrutturante", "trattamento_cute", None]
                     }
                 },
-                "required": ["appointment_id", "new_date", "new_time", "new_service"],
+                "required": ["customer_name", "current_date", "current_time", "new_date", "new_time", "new_service"],
                 "additionalProperties": False
             }
         }
@@ -1638,7 +2850,7 @@ BOOKING_TOOLS = [
                 "properties": {
                     "date": {
                         "type": "string",
-                        "description": f"Date in YYYY-MM-DD format. Today is {TODAY}, tomorrow is {TOMORROW}"
+                        "description": "Date in YYYY-MM-DD format"
                     }
                 },
                 "required": ["date"],
@@ -1650,12 +2862,31 @@ BOOKING_TOOLS = [
         "type": "function",
         "function": {
             "name": "confirm_reminder",
-            "description": "Confirm a reminder for tomorrow's appointment. Call this when customer confirms they will come to their appointment tomorrow (e.g., 'ci sarò', 'confermo', 'vengo', 'ok ci vediamo', 'yes I'll be there').",
+            "description": "Confirm customer's upcoming appointment. Call this when customer confirms they will attend ANY future appointment (not just tomorrow). Examples: 'confermo', 'ci sarò', 'vengo', 'ok ci vediamo martedì', 'yes I'll be there', 'confermo che vengo'. IMPORTANT: Always call this when customer expresses confirmation of their appointment!",
             "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {},
                 "required": [],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "escalate_to_human",
+            "description": "Escalate conversation to a real person. Call this when customer has a COMPLAINT, is ANGRY/FRUSTRATED, has a PROBLEM you cannot solve, or explicitly asks to speak with a human/manager. This will freeze the chat and notify the owner.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief description of why escalation is needed (e.g., 'customer complaint about service', 'customer very frustrated', 'request to speak with manager')"
+                    }
+                },
+                "required": ["reason"],
                 "additionalProperties": False
             }
         }
@@ -1686,53 +2917,102 @@ BOOKING_FUNCTIONS = convert_tools_to_functions(BOOKING_TOOLS) if OPENAI_SDK_VERS
 # FUNCTION EXECUTION
 # ============================================================================
 
-def execute_function(function_name: str, arguments: str, phone: str) -> Dict[str, Any]:
+def execute_function(function_name: str, arguments: str, phone: str,
+                     platform: str = "whatsapp",
+                     business_id: int = None, biz_context: dict = None) -> Dict[str, Any]:
     """Execute a booking function"""
     try:
+        if business_id is not None and not biz_context:
+            raise ValueError("business_id requires biz_context")
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
-        
+
         if function_name == "create_appointment":
             return create_appointment(
                 customer_phone=phone,
                 customer_name=args["customer_name"],
                 service_type=args["service_type"],
                 date=args["date"],
-                time=args["time"]
+                time=args["time"],
+                platform=platform,
+                business_id=business_id,
+                biz_context=biz_context,
+                operator_name=args.get("operator_name")
             )
-        
+
         elif function_name == "check_availability":
             return check_availability(
                 date=args["date"],
-                time=args["time"]
+                time=args["time"],
+                business_id=business_id,
+                biz_context=biz_context,
+                operator_name=args.get("operator_name"),
+                treatment_code=args.get("treatment_code") or args.get("service_type")
             )
-        
+
         elif function_name == "get_customer_appointments":
-            return get_customer_appointments(customer_phone=phone)
-        
+            return get_customer_appointments(customer_phone=phone, business_id=business_id, biz_context=biz_context)
+
         elif function_name == "cancel_appointment":
             return cancel_appointment(
                 customer_phone=phone,
-                appointment_id=args["appointment_id"]
+                customer_name=args["customer_name"],
+                date=args["date"],
+                time=args["time"],
+                business_id=business_id,
+                biz_context=biz_context
             )
 
         elif function_name == "modify_appointment":
             return modify_appointment(
                 customer_phone=phone,
-                appointment_id=args["appointment_id"],
+                customer_name=args["customer_name"],
+                current_date=args["current_date"],
+                current_time=args["current_time"],
                 new_date=args.get("new_date"),
                 new_time=args.get("new_time"),
-                new_service=args.get("new_service")
+                new_service=args.get("new_service"),
+                business_id=business_id,
+                biz_context=biz_context,
+                new_operator=args.get("new_operator")
             )
 
         elif function_name == "get_available_slots":
-            return get_available_slots(date=args["date"])
+            return get_available_slots(date=args["date"], business_id=business_id, biz_context=biz_context,
+                                       operator_name=args.get("operator_name"))
 
         elif function_name == "confirm_reminder":
-            return mark_reminder_confirmed(phone)
+            return mark_reminder_confirmed(phone, business_id=business_id)
+
+        elif function_name == "escalate_to_human":
+            return escalate_to_human(phone=phone, reason=args["reason"], biz_context=biz_context)
+
+        elif function_name == "lookup_treatment":
+            bid = business_id or 1
+            return lookup_treatment(bid, args["treatment_name"])
+
+        elif function_name == "lookup_business_policy":
+            bid = business_id or 1
+            return lookup_business_policy(bid, args["policy_type"])
+
+        elif function_name == "lookup_closure_dates":
+            bid = business_id or 1
+            return lookup_closure_dates(bid, month=args.get("month"))
+
+        elif function_name == "lookup_faq":
+            bid = business_id or 1
+            return lookup_faq(bid, args["question"])
+
+        elif function_name == "lookup_operator_for_treatment":
+            bid = business_id or 1
+            return lookup_operator_for_treatment(bid, args["treatment_code"])
+
+        elif function_name == "get_available_treatments":
+            bid = business_id or 1
+            return get_available_treatments(bid)
 
         else:
             return {"success": False, "error": "UNKNOWN_FUNCTION", "function_name": function_name}
-    
+
     except Exception as e:
         logger.error(f"Function execution error: {e}")
         return {"success": False, "error": str(e)}
@@ -1742,76 +3022,11 @@ def execute_function(function_name: str, arguments: str, phone: str) -> Dict[str
 # ============================================================================
 
 conversation_history: Dict[str, List[Dict]] = {}
+# Bug #1 fix: track last activity per phone to expire stale in-memory sessions
+last_activity: Dict[str, "datetime"] = {}
+SESSION_IDLE_HOURS = 1  # Reset conversation context after 1h idle
 
-def detect_language(text: str) -> str:
-    """
-    Detect language of a message. Returns 'en' for English, 'it' for Italian.
-    Uses keyword-based detection for reliability with word boundary matching.
-    """
-    import re
-    text_lower = text.lower().strip()
-
-    # Tokenize into words (preserving word boundaries)
-    words = set(re.findall(r'\b\w+\b', text_lower))
-
-    # Strong English indicators (common English words)
-    english_words = {
-        'hi', 'hello', 'hey', 'morning', 'afternoon', 'evening',
-        'thanks', 'thank', 'please', 'yes', 'okay',
-        'book', 'booking', 'appointment', 'haircut', 'cancel', 'reschedule',
-        'what', 'when', 'where', 'how', 'why', 'who', 'which',
-        'are', 'you', 'do', 'can', 'could', 'would', 'will', 'should',
-        'available', 'tomorrow', 'today', 'time', 'price', 'cost', 'much',
-        'services', 'service', 'open', 'close', 'hours', 'hour',
-        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
-        'want', 'need', 'like',
-        'the', 'is', 'was', 'were', 'be', 'been', 'have', 'has', 'had',
-        'this', 'that', 'these', 'those', 'my', 'your', 'our', 'their',
-        'for', 'at', 'any', 'slots', 'cut', 'hair', 'there',
-        'pm', 'am', 'and', 'or', 'but', 'with', 'from', 'to',
-    }
-
-    # Strong Italian indicators (common Italian words)
-    italian_words = {
-        'ciao', 'salve', 'buongiorno', 'buonasera', 'buonanotte',
-        'grazie', 'prego', 'favore', 'per', 'sì', 'si',
-        'prenotare', 'prenotazione', 'appuntamento', 'taglio', 'cancellare',
-        'cosa', 'quando', 'dove', 'come', 'perché', 'chi', 'quale',
-        'sei', 'siete', 'posso', 'puoi', 'potrebbe', 'vorrei',
-        'disponibile', 'domani', 'oggi', 'prezzo', 'costo', 'quanto',
-        'servizi', 'servizio', 'aperto', 'chiuso', 'orari', 'orario',
-        'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato', 'domenica',
-        'mattina', 'pomeriggio', 'sera',
-        # Pronouns and common verbs
-        'mi', 'ti', 'ci', 'vi', 'chiamo', 'chiamare', 'nome', 'scusa', 'scusi',
-        'perfetto', 'bene', 'benissimo', 'va', 'fatto', 'pronto', 'aspetto',
-        'conferma', 'confermo', 'annulla', 'modifica', 'sposta', 'cambia',
-        'ora', 'adesso', 'dopo', 'prima', 'subito', 'ancora', 'già',
-        'solo', 'anche', 'molto', 'poco', 'tanto', 'tutto', 'niente',
-        'voglio', 'bisogno',
-        'il', 'lo', 'gli', 'le', 'un', 'una', 'uno', 'della', 'del', 'dei',
-        'sono', 'era', 'erano', 'essere', 'stato', 'avere', 'hai', 'aveva',
-        'questo', 'questa', 'questi', 'queste', 'quello', 'quella',
-        'mio', 'mia', 'tuo', 'tua', 'nostro', 'nostra', 'loro',
-        'con', 'alle', 'dalle', 'alle',
-    }
-
-    # Note: 'la', 'no', 'ok', 'si', 'a', 'e', 'i', 'o' are too ambiguous - excluded
-    # 'no' and 'ok' appear in both languages
-
-    # Count matches using word boundaries
-    english_count = len(words & english_words)
-    italian_count = len(words & italian_words)
-
-    # Log for debugging
-    logger.debug(f"Language detection: '{text[:50]}' → EN:{english_count} IT:{italian_count}")
-
-    # Default to English if unclear (most international users expect English)
-    if italian_count > english_count:
-        return 'it'
-    return 'en'
-
-def get_ai_response(phone: str, message: str) -> str:
+def get_ai_response(phone: str, message: str, platform: str = "whatsapp", business_id: int = None, biz_context: dict = None) -> str:
     """
     Get AI response with SDK version compatibility.
 
@@ -1822,25 +3037,68 @@ def get_ai_response(phone: str, message: str) -> str:
     - Temperature=0 for deterministic behavior
     """
     try:
+        # Clear stale in-memory session if idle > SESSION_IDLE_HOURS
+        from datetime import datetime as _dt, timedelta as _td
+        _now = _dt.now()
+        _was_idle_reset = False
+        if phone in last_activity and (_now - last_activity[phone]) > _td(hours=SESSION_IDLE_HOURS):
+            logger.info(f"⏰ In-memory session idle >{SESSION_IDLE_HOURS}h for {phone} — clearing")
+            conversation_history.pop(phone, None)
+            _was_idle_reset = True
+        last_activity[phone] = _now
+
         # Get or create conversation history
         if phone not in conversation_history:
-            conversation_history[phone] = []
+            conversation_history[phone] = load_conversation_history_from_db(phone, business_id=business_id)
 
-        # Detect language of current message
-        detected_lang = detect_language(message)
-        lang_instruction = (
-            "[RESPOND IN ENGLISH - The customer is writing in English]"
-            if detected_lang == 'en'
-            else "[RISPONDI IN ITALIANO - Il cliente sta scrivendo in italiano]"
-        )
-        logger.info(f"🌐 Language detected: {detected_lang.upper()} for message: '{message[:50]}...'")
+        # AI-native language detection: Let GPT-4o detect and maintain language from conversation context
+        logger.info(f"🌐 AI-native language detection for message: '{message[:50]}...'")
 
-        # Build messages with explicit language instruction
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        messages.extend(conversation_history[phone][-10:])  # Last 10 messages
-        # Add language instruction as a system message before user's message
-        messages.append({"role": "system", "content": lang_instruction})
-        messages.append({"role": "user", "content": message})
+        # Normalize to lowercase so all-caps input doesn't bypass date/closure parsing (P3 fix)
+        normalized_message = message.lower()
+
+        # Bug #5: lookup known customer name to avoid asking again for repeat clients
+        _known_name = None
+        try:
+            _conn_lookup = get_db_connection()
+            _cur_lookup = _conn_lookup.cursor()
+            if business_id is not None:
+                _cur_lookup.execute(
+                    """SELECT customer_name FROM appointments
+                       WHERE business_id = %s AND customer_phone = %s
+                         AND customer_name IS NOT NULL AND customer_name <> ''
+                         AND customer_name NOT IN ('Cliente','Utente')
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (business_id, phone)
+                )
+                _r = _cur_lookup.fetchone()
+                if _r:
+                    _known_name = _r[0]
+            _conn_lookup.close()
+        except Exception as _e_lookup:
+            logger.warning(f"known-name lookup failed: {_e_lookup}")
+
+        _system_prompt = get_system_prompt(biz_context)
+        if _known_name:
+            _system_prompt = (
+                f"[KNOWN CUSTOMER NAME: {_known_name}]\n"
+                f"This customer has booked with us before. Use this exact name for any new booking. "
+                f"DO NOT ask for the name again — the customer is already known.\n\n"
+                + _system_prompt
+            )
+        if _was_idle_reset:
+            _system_prompt = (
+                f"[NEW SESSION: previous conversation cleared after idle timeout]\n"
+                f"Start with a warm greeting like 'Ciao! Come posso aiutarti?' before responding to their message.\n\n"
+                + _system_prompt
+            )
+        # Build messages - GPT-4o will detect language from conversation history
+        messages = [{"role": "system", "content": _system_prompt}]
+        messages.extend(conversation_history[phone][-10:])  # Last 10 messages for context
+        messages.append({"role": "user", "content": normalized_message})
+
+        # Use dynamic tools when biz_context is available, else legacy fallback
+        tools = build_booking_tools(biz_context["services"], operators=biz_context.get("operators", [])) if biz_context else BOOKING_TOOLS
 
         # Call OpenAI with version-appropriate syntax
         if OPENAI_SDK_VERSION >= 1:
@@ -1848,7 +3106,7 @@ def get_ai_response(phone: str, message: str) -> str:
             response = openai_client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
-                tools=BOOKING_TOOLS,
+                tools=tools,
                 tool_choice="auto",
                 temperature=0
             )
@@ -1856,10 +3114,12 @@ def get_ai_response(phone: str, message: str) -> str:
             has_function_call = bool(assistant_message.tool_calls)
         else:
             # Old SDK v0.x syntax
+            # Convert dynamic tools to old SDK format
+            dynamic_functions = convert_tools_to_functions(tools)
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=messages,
-                functions=BOOKING_FUNCTIONS,
+                functions=dynamic_functions,
                 function_call="auto",
                 temperature=0
             )
@@ -1895,7 +3155,7 @@ def get_ai_response(phone: str, message: str) -> str:
                     logger.info(f"🔧 AI calling tool: {function_name}")
                     logger.info(f"   Args: {function_args}")
 
-                    function_result = execute_function(function_name, function_args, phone)
+                    function_result = execute_function(function_name, function_args, phone, platform, business_id=business_id, biz_context=biz_context)
                     logger.info(f"   Result: {function_result}")
 
                     messages.append({
@@ -1914,7 +3174,7 @@ def get_ai_response(phone: str, message: str) -> str:
 
                 messages.append(assistant_message)
 
-                function_result = execute_function(function_name, function_args, phone)
+                function_result = execute_function(function_name, function_args, phone, platform, business_id=business_id, biz_context=biz_context)
                 logger.info(f"   Result: {function_result}")
 
                 messages.append({
@@ -1928,7 +3188,7 @@ def get_ai_response(phone: str, message: str) -> str:
                 second_response = openai_client.chat.completions.create(
                     model="gpt-4o",
                     messages=messages,
-                    tools=BOOKING_TOOLS,
+                    tools=tools,
                     tool_choice="auto",
                     temperature=0
                 )
@@ -1938,7 +3198,7 @@ def get_ai_response(phone: str, message: str) -> str:
                 second_response = openai.ChatCompletion.create(
                     model="gpt-4o",
                     messages=messages,
-                    functions=BOOKING_FUNCTIONS,
+                    functions=dynamic_functions,
                     function_call="auto",
                     temperature=0
                 )
@@ -1970,7 +3230,7 @@ def get_ai_response(phone: str, message: str) -> str:
                         tool_call_id_2 = tool_call.id
 
                         logger.info(f"🔧 AI calling second tool: {func2_name}")
-                        func2_result = execute_function(func2_name, func2_args, phone)
+                        func2_result = execute_function(func2_name, func2_args, phone, platform, business_id=business_id, biz_context=biz_context)
                         logger.info(f"   Result: {func2_result}")
 
                         messages.append({
@@ -1987,7 +3247,7 @@ def get_ai_response(phone: str, message: str) -> str:
 
                     messages.append(second_message)
 
-                    func2_result = execute_function(func2_name, func2_args, phone)
+                    func2_result = execute_function(func2_name, func2_args, phone, platform, business_id=business_id, biz_context=biz_context)
                     logger.info(f"   Result: {func2_result}")
 
                     messages.append({
@@ -2001,7 +3261,7 @@ def get_ai_response(phone: str, message: str) -> str:
                     third_response = openai_client.chat.completions.create(
                         model="gpt-4o",
                         messages=messages,
-                        tools=BOOKING_TOOLS,
+                        tools=tools,
                         tool_choice="auto",
                         temperature=0
                     )
@@ -2011,7 +3271,7 @@ def get_ai_response(phone: str, message: str) -> str:
                     third_response = openai.ChatCompletion.create(
                         model="gpt-4o",
                         messages=messages,
-                        functions=BOOKING_FUNCTIONS,
+                        functions=dynamic_functions,
                         function_call="auto",
                         temperature=0
                     )
@@ -2043,7 +3303,7 @@ def get_ai_response(phone: str, message: str) -> str:
                             tool_call_id_3 = tool_call.id
 
                             logger.info(f"🔧 AI calling third tool: {func3_name}")
-                            func3_result = execute_function(func3_name, func3_args, phone)
+                            func3_result = execute_function(func3_name, func3_args, phone, platform, business_id=business_id, biz_context=biz_context)
                             logger.info(f"   Result: {func3_result}")
 
                             messages.append({
@@ -2067,7 +3327,7 @@ def get_ai_response(phone: str, message: str) -> str:
 
                         messages.append(third_message)
 
-                        func3_result = execute_function(func3_name, func3_args, phone)
+                        func3_result = execute_function(func3_name, func3_args, phone, platform, business_id=business_id, biz_context=biz_context)
                         logger.info(f"   Result: {func3_result}")
 
                         messages.append({
@@ -2094,7 +3354,7 @@ def get_ai_response(phone: str, message: str) -> str:
                     final_message = second_message.get("content", '') or ''
 
             # Save to history
-            conversation_history[phone].append({"role": "user", "content": message})
+            conversation_history[phone].append({"role": "user", "content": normalized_message})
             conversation_history[phone].append({"role": "assistant", "content": final_message})
 
             return final_message
@@ -2107,7 +3367,7 @@ def get_ai_response(phone: str, message: str) -> str:
                 response_text = assistant_message.get("content", '') or ''
 
             # Save to history
-            conversation_history[phone].append({"role": "user", "content": message})
+            conversation_history[phone].append({"role": "user", "content": normalized_message})
             conversation_history[phone].append({"role": "assistant", "content": response_text})
 
             return response_text
@@ -2138,15 +3398,18 @@ def get_ai_response(phone: str, message: str) -> str:
 # WHATSAPP SERVICE
 # ============================================================================
 
-async def send_whatsapp_message(phone: str, message: str) -> bool:
-    """Send WhatsApp message"""
-    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    
+async def send_whatsapp_message(phone: str, message: str, business: dict = None) -> bool:
+    """Send WhatsApp message using per-business credentials."""
+    phone_number_id = (business or {}).get("whatsapp_phone_number_id") or WHATSAPP_PHONE_NUMBER_ID
+    access_token = (business or {}).get("meta_access_token") or WHATSAPP_ACCESS_TOKEN
+
+    url = f"https://graph.facebook.com/v18.0/{phone_number_id}/messages"
+
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -2154,7 +3417,7 @@ async def send_whatsapp_message(phone: str, message: str) -> bool:
         "type": "text",
         "text": {"body": message}
     }
-    
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload, timeout=30)
@@ -2168,27 +3431,341 @@ async def send_whatsapp_message(phone: str, message: str) -> bool:
         logger.error(f"❌ WhatsApp API error: {e}")
         return False
 
-async def mark_as_read(message_id: str) -> bool:
-    """Mark message as read"""
-    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    
+async def mark_as_read(message_id: str, business: dict = None) -> bool:
+    """Mark message as read using per-business credentials."""
+    phone_number_id = (business or {}).get("whatsapp_phone_number_id") or WHATSAPP_PHONE_NUMBER_ID
+    access_token = (business or {}).get("meta_access_token") or WHATSAPP_ACCESS_TOKEN
+
+    url = f"https://graph.facebook.com/v18.0/{phone_number_id}/messages"
+
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
         "messaging_product": "whatsapp",
         "status": "read",
         "message_id": message_id
     }
-    
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload, timeout=10)
             return response.status_code == 200
     except:
         return False
+
+# ============================================================================
+# INSTAGRAM MESSAGING
+# ============================================================================
+
+def split_message(message: str, max_length: int = 1000) -> List[str]:
+    """Split a long message into chunks that fit Instagram's character limit"""
+    if len(message) <= max_length:
+        return [message]
+
+    chunks = []
+    current_chunk = ""
+
+    for line in message.split('\n'):
+        if len(current_chunk) + len(line) + 1 <= max_length:
+            current_chunk += ('\n' if current_chunk else '') + line
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            if len(line) > max_length:
+                words = line.split(' ')
+                current_chunk = ""
+                for word in words:
+                    if len(current_chunk) + len(word) + 1 <= max_length:
+                        current_chunk += (' ' if current_chunk else '') + word
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = word
+            else:
+                current_chunk = line
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+async def send_instagram_message(recipient_id: str, message: str) -> bool:
+    """Send Instagram DM via Graph API"""
+    if not INSTAGRAM_ACCESS_TOKEN:
+        logger.error("[IG] No access token configured")
+        return False
+
+    url = "https://graph.instagram.com/v21.0/me/messages"
+
+    headers = {
+        "Authorization": f"Bearer {INSTAGRAM_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    chunks = split_message(message, max_length=1000)
+
+    success = True
+    for chunk in chunks:
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": chunk}
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, json=payload, timeout=30)
+                if response.status_code == 200:
+                    logger.info(f"[IG] Message sent to {recipient_id}")
+                else:
+                    logger.error(f"[IG] Send failed: {response.status_code} - {response.text}")
+                    success = False
+        except Exception as e:
+            logger.error(f"[IG] API error: {e}")
+            success = False
+
+        if len(chunks) > 1:
+            await asyncio.sleep(0.5)
+
+    return success
+
+
+# Instagram message buffering (separate from WhatsApp, keyed by Instagram user IDs)
+ig_pending_messages: Dict[str, List[Dict]] = {}
+ig_pending_timers: Dict[str, asyncio.Task] = {}
+
+
+async def ig_process_buffered_messages(user_id: str):
+    """Process all buffered Instagram messages for a user after timer expires"""
+    try:
+        messages = ig_pending_messages.pop(user_id, [])
+        ig_pending_timers.pop(user_id, None)
+
+        if not messages:
+            return
+
+        username = messages[0].get("username", "Cliente")
+        combined_text = "\n".join(msg["text"] for msg in messages) if len(messages) > 1 else messages[0]["text"]
+
+        logger.info(f"[IG] Timer fired for {user_id}. Processing {len(messages)} buffered message(s)")
+
+        response = get_ai_response(user_id, combined_text, platform="instagram")
+        save_conversation_to_db(user_id, username, combined_text, response, platform="instagram")
+        await send_instagram_message(user_id, response)
+
+    except Exception as e:
+        logger.error(f"[IG] Error processing buffered messages for {user_id}: {e}")
+        ig_pending_messages.pop(user_id, None)
+        ig_pending_timers.pop(user_id, None)
+
+
+async def ig_handle_buffered_message(user_id: str, text: str, username: str):
+    """Handle incoming Instagram message with batching"""
+    if user_id not in ig_pending_messages:
+        ig_pending_messages[user_id] = []
+
+    ig_pending_messages[user_id].append({
+        "text": text,
+        "username": username,
+        "timestamp": datetime.now(ITALY_TZ).isoformat()
+    })
+    logger.info(f"[IG] Buffered message for {user_id}. Buffer size: {len(ig_pending_messages[user_id])}")
+
+    if user_id in ig_pending_timers:
+        old_timer = ig_pending_timers[user_id]
+        old_timer.cancel()
+        logger.info(f"[IG] Reset timer for {user_id}")
+
+    async def timer_callback():
+        await asyncio.sleep(MESSAGE_BATCH_DELAY_SECONDS)
+        await ig_process_buffered_messages(user_id)
+
+    timer_task = asyncio.create_task(timer_callback())
+    ig_pending_timers[user_id] = timer_task
+    logger.info(f"[IG] Started {MESSAGE_BATCH_DELAY_SECONDS}s timer for {user_id}")
+
+
+async def process_instagram_event(event: Dict[str, Any]):
+    """Process an Instagram messaging event"""
+    try:
+        sender_id = event.get("sender", {}).get("id")
+        if not sender_id:
+            return
+
+        # Ignore messages from ourselves (echo)
+        if sender_id == INSTAGRAM_PAGE_ID:
+            return
+
+        message = event.get("message", {})
+        if not message:
+            return
+
+        if message.get("is_echo"):
+            return
+
+        message_text = message.get("text")
+        username = "Cliente"
+
+        logger.info(f"[IG] Message from {sender_id}: {message_text[:100] if message_text else '(no text)'}...")
+
+        if sender_id in chat_blocked:
+            logger.info(f"[IG] Chat blocked for {sender_id}, ignoring message")
+            return
+
+        if message_text:
+            if MESSAGE_BATCHING_ENABLED:
+                await ig_handle_buffered_message(sender_id, message_text, username)
+            else:
+                response = get_ai_response(sender_id, message_text)
+                save_conversation_to_db(sender_id, username, message_text, response, platform="instagram")
+                await send_instagram_message(sender_id, response)
+
+        elif message.get("attachments"):
+            attachments = message.get("attachments", [])
+            attachment_type = attachments[0].get("type", "unknown") if attachments else "unknown"
+
+            logger.info(f"[IG] Media message type: {attachment_type} from {sender_id}")
+
+            if attachment_type == "image":
+                send_alert_email(
+                    "[IG] Immagine ricevuta",
+                    f"L'utente Instagram {sender_id} ha inviato un'immagine.\nRichiede attenzione manuale."
+                )
+                await send_instagram_message(sender_id,
+                    "Abbiamo ricevuto la tua immagine. Ti rispondera presto un membro del nostro team.")
+
+            elif attachment_type == "video":
+                send_alert_email(
+                    "[IG] Video ricevuto",
+                    f"L'utente Instagram {sender_id} ha inviato un video.\nRichiede attenzione manuale."
+                )
+                await send_instagram_message(sender_id,
+                    "Abbiamo ricevuto il tuo video. Ti rispondera presto un membro del nostro team.")
+
+            elif attachment_type == "audio":
+                send_alert_email(
+                    "[IG] Messaggio vocale ricevuto",
+                    f"L'utente Instagram {sender_id} ha inviato un messaggio vocale.\nRichiede attenzione manuale."
+                )
+                await send_instagram_message(sender_id,
+                    "Al momento non possiamo ascoltare i messaggi vocali. "
+                    "Se puoi, scrivici il tuo messaggio. Altrimenti ti rispondera presto un membro del nostro team.")
+
+            elif attachment_type in ("sticker", "like_heart"):
+                logger.info(f"[IG] Sticker/reaction from {sender_id}. Ignored.")
+
+            elif attachment_type == "story_mention":
+                send_alert_email(
+                    "[IG] Menzione nella storia",
+                    f"L'utente Instagram {sender_id} ci ha menzionato nella sua storia."
+                )
+                await send_instagram_message(sender_id,
+                    "Grazie per averci menzionato nella tua storia! Come possiamo aiutarti?")
+
+            elif attachment_type == "story_reply":
+                story_reply_text = message.get("reply_to", {}).get("story", {}).get("text", "")
+                if story_reply_text:
+                    response = get_ai_response(sender_id, story_reply_text)
+                    save_conversation_to_db(sender_id, username, f"[Story reply] {story_reply_text}", response, platform="instagram")
+                    await send_instagram_message(sender_id, response)
+                else:
+                    await send_instagram_message(sender_id,
+                        "Grazie per la risposta alla nostra storia! Come possiamo aiutarti?")
+            else:
+                await send_instagram_message(sender_id,
+                    "Posso rispondere solo a messaggi di testo. Come posso aiutarti?")
+
+        elif event.get("reaction"):
+            logger.info(f"[IG] Reaction from {sender_id}. Ignored.")
+
+    except Exception as e:
+        logger.error(f"[IG] Process event error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+# ============================================================================
+# INSTAGRAM REMINDERS
+# ============================================================================
+
+def get_tomorrow_instagram_appointments() -> List[Dict]:
+    """Get confirmed appointments for tomorrow that came from Instagram"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        cur.execute("""
+            SELECT id, customer_phone, customer_name, service_type,
+                   appointment_date, appointment_time, price
+            FROM salon_appointments
+            WHERE appointment_date = %s
+              AND status = 'confirmed'
+              AND platform = 'instagram'
+              AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
+            ORDER BY appointment_time
+        """, (tomorrow,))
+
+        appointments = []
+        for row in cur.fetchall():
+            appointments.append({
+                "id": row[0], "user_id": row[1], "name": row[2],
+                "service": row[3], "date": row[4], "time": row[5], "price": row[6]
+            })
+
+        cur.close()
+        conn.close()
+        return appointments
+    except Exception as e:
+        logger.error(f"[IG] Error getting tomorrow appointments: {e}")
+        return []
+
+
+async def send_ig_reminder_messages():
+    """Send reminder messages via Instagram DMs"""
+    logger.info("[IG] Starting daily reminder job...")
+
+    appointments = get_tomorrow_instagram_appointments()
+    logger.info(f"[IG] Found {len(appointments)} Instagram appointments for tomorrow")
+
+    for apt in appointments:
+        time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
+
+        reminder_message = (
+            f"Buongiorno!\n"
+            f"Ti ricordiamo che domani alle ore {time_str} hai un appuntamento con noi.\n"
+            f"Ti chiediamo gentilmente di confermare rispondendo a questo messaggio entro le 18:00 di oggi.\n\n"
+            f"In caso di mancata conferma, non possiamo garantire la disponibilita dell'appuntamento.\n\n"
+            f"Grazie!"
+        )
+
+        user_id = apt["user_id"]
+        success = await send_instagram_message(user_id, reminder_message)
+
+        if success:
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("UPDATE salon_appointments SET reminder_sent_at = CURRENT_TIMESTAMP WHERE id = %s", (apt["id"],))
+                conn.commit()
+                cur.close()
+                conn.close()
+            except:
+                pass
+
+            save_conversation_to_db(
+                phone=user_id, name=apt["name"],
+                message="[SISTEMA: Promemoria appuntamento inviato automaticamente]",
+                response=reminder_message, platform="instagram"
+            )
+            logger.info(f"[IG] Reminder sent to {apt['name']} ({user_id})")
+
+    logger.info(f"[IG] Reminder job completed. Sent {len(appointments)} reminders.")
+
 
 # ============================================================================
 # FASTAPI APPLICATION
@@ -2213,7 +3790,7 @@ async def startup():
     """Initialize on startup"""
     initialize_database()
     setup_reminder_scheduler()
-    logger.info(f"🚀 {BUSINESS_NAME} WhatsApp Bot with Booking started!")
+    logger.info(f"🚀 {BUSINESS_NAME} WhatsApp + Instagram Bot started!")
 
 @app.get("/webhook")
 async def verify_webhook(request: Request):
@@ -2221,11 +3798,11 @@ async def verify_webhook(request: Request):
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
-    
+
     if mode == "subscribe" and token == WHATSAPP_WEBHOOK_VERIFY_TOKEN:
         logger.info("✅ Webhook verified!")
         return PlainTextResponse(challenge)
-    
+
     return PlainTextResponse("Failed", status_code=403)
 
 @app.post("/webhook")
@@ -2233,74 +3810,224 @@ async def webhook(request: Request):
     """Handle incoming WhatsApp messages"""
     try:
         body = await request.json()
-        
+
         if body.get("object") != "whatsapp_business_account":
             return JSONResponse({"status": "ignored"})
-        
+
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
                 messages = value.get("messages", [])
-                
+
+                if not messages:
+                    continue
+
+                # --- MULTI-TENANT ROUTING ---
+                phone_number_id = extract_phone_number_id(value)
+                if not phone_number_id:
+                    logger.warning("No phone_number_id in webhook payload")
+                    continue
+
+                try:
+                    business = load_business_by_phone_number_id(phone_number_id)
+                except BusinessNotFoundError:
+                    logger.warning(f"No business for phone_number_id={phone_number_id}")
+                    continue
+
+                business_services = load_services(business["id"])
+                business_hours = load_business_hours(business["id"])
+                business_closures = load_closures(business["id"])
+                business_operators = load_operators(business["id"])
+
+                business_faqs = load_faqs(business["id"])
+
+                biz_context = {
+                    "business": business,
+                    "services": business_services,
+                    "hours": business_hours,
+                    "closures": business_closures,
+                    "operators": business_operators,
+                    "faqs": business_faqs,
+                }
+                # --- END ROUTING ---
+
                 for message in messages:
-                    await process_message(message, value)
-        
+                    await process_message(message, value, biz_context)
+
         return JSONResponse({"status": "processed"})
-    
+
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}")
         return JSONResponse({"status": "error"})
 
-async def process_message(message: Dict[str, Any], value: Dict[str, Any]):
+# ============================================================================
+# INSTAGRAM WEBHOOK ENDPOINTS
+# ============================================================================
+
+@app.get("/webhook/instagram")
+async def verify_instagram_webhook(request: Request):
+    """Instagram webhook verification"""
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    if mode == "subscribe" and token == INSTAGRAM_WEBHOOK_VERIFY_TOKEN:
+        logger.info("[IG] Webhook verified!")
+        return PlainTextResponse(challenge)
+
+    logger.warning(f"[IG] Webhook verification failed. Token: {token}")
+    return PlainTextResponse("Failed", status_code=403)
+
+
+@app.post("/webhook/instagram")
+async def instagram_webhook(request: Request):
+    """Handle incoming Instagram DMs"""
+    try:
+        body = await request.json()
+
+        if body.get("object") != "instagram":
+            return JSONResponse({"status": "ignored"})
+
+        for entry in body.get("entry", []):
+            messaging_events = entry.get("messaging", [])
+
+            for event in messaging_events:
+                await process_instagram_event(event)
+
+        return JSONResponse({"status": "processed"})
+
+    except Exception as e:
+        logger.error(f"[IG] Webhook error: {e}")
+        return JSONResponse({"status": "error"})
+
+
+async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_context: dict = None):
     """Process incoming message"""
     try:
+        business = biz_context["business"] if biz_context else {}
+        biz_id = business.get("id") if business else None
+
         phone = message.get("from")
         message_id = message.get("id")
         message_type = message.get("type", "text")
-        
+
         # Get contact name
         contacts = value.get("contacts", [])
         contact_name = contacts[0].get("profile", {}).get("name", "Cliente") if contacts else "Cliente"
-        
-        logger.info(f"💬 Message from {phone} ({contact_name})")
-        
-        await mark_as_read(message_id)
-        
+
+        biz_name = business.get("name", "Unknown") if business else "Unknown"
+        logger.info(f"💬 [{biz_name}] Message from {phone} ({contact_name})")
+
+        await mark_as_read(message_id, business)
+
+        # Check if chat is blocked (complaint was filed)
+        if phone in chat_blocked:
+            logger.info(f"🔒 Chat blocked for {phone}, ignoring message")
+            return  # Don't respond to blocked chats
+
         if message_type == "text":
             text = message.get("text", {}).get("body", "")
             if text:
                 logger.info(f"📝 Message: {text[:100]}...")
 
-                # All messages go through AI - AI will call confirm_reminder if needed
-                response = get_ai_response(phone, text)
-
-                # Log conversation to database for analytics
-                save_conversation_to_db(phone, contact_name, text, response)
-
-                # Log response preview
-                logger.info(f"📤 Response: {response[:100]}...")
-
-                await send_whatsapp_message(phone, response)
+                if MESSAGE_BATCHING_ENABLED:
+                    # Buffer the message and start/reset timer
+                    await handle_buffered_message(phone, text, contact_name, biz_context)
+                else:
+                    # Original immediate processing (fallback)
+                    response = get_ai_response(phone, text, business_id=biz_id, biz_context=biz_context)
+                    save_conversation_to_db(phone, contact_name, text, response, business_id=biz_id)
+                    logger.info(f"📤 Response: {response[:100]}...")
+                    await send_whatsapp_message(phone, response, business)
 
         elif message_type == "interactive":
             interactive = message.get("interactive", {})
             text = interactive.get("button_reply", {}).get("title", "") or \
                    interactive.get("list_reply", {}).get("title", "")
             if text:
-                response = get_ai_response(phone, text)
+                response = get_ai_response(phone, text, business_id=biz_id, biz_context=biz_context)
 
                 # Log conversation to database for analytics
-                save_conversation_to_db(phone, contact_name, text, response)
+                save_conversation_to_db(phone, contact_name, text, response, business_id=biz_id)
 
-                await send_whatsapp_message(phone, response)
-        
+                await send_whatsapp_message(phone, response, business)
+
         else:
-            await send_whatsapp_message(phone,
-                "I can only respond to text messages. How can I help you with your booking? 💇‍♀️\n\n"
-                "Posso rispondere solo a messaggi di testo. Come posso aiutarti con la prenotazione? 💇‍♀️")
-    
+            # Non-text message (voice, sticker, image, etc.)
+            logger.info(f"🎤 Non-text message type: {message_type} from {phone}")
+
+            # Handle different media types with specific responses and email alerts
+            if message_type == "audio":
+                send_alert_email(
+                    "📥 Messaggio vocale ricevuto",
+                    f"L'utente {contact_name} ({phone}) ha inviato un messaggio vocale.\n\nRichiede attenzione manuale."
+                )
+                response_msg = (
+                    "Al momento non siamo ancora in grado di ascoltare i messaggi vocali. "
+                    "Ci stiamo lavorando! 😊\n\n"
+                    "Se puoi, scrivici qui il tuo messaggio. "
+                    "Altrimenti ti risponderà presto un membro del nostro team."
+                )
+                await send_whatsapp_message(phone, response_msg, business)
+
+            elif message_type == "image":
+                send_alert_email(
+                    "🖼️ Immagine ricevuta",
+                    f"L'utente {contact_name} ({phone}) ha inviato un'immagine.\n\nRichiede attenzione manuale."
+                )
+                response_msg = "Abbiamo ricevuto la tua immagine. Ti risponderà presto un membro del nostro team. 😊"
+                await send_whatsapp_message(phone, response_msg, business)
+
+            elif message_type == "video":
+                send_alert_email(
+                    "🎞️ Video ricevuto",
+                    f"L'utente {contact_name} ({phone}) ha inviato un video.\n\nRichiede attenzione manuale."
+                )
+                response_msg = "Abbiamo ricevuto il tuo video. Ti risponderà presto un membro del nostro team. 😊"
+                await send_whatsapp_message(phone, response_msg, business)
+
+            elif message_type == "document":
+                send_alert_email(
+                    "📎 Documento ricevuto",
+                    f"L'utente {contact_name} ({phone}) ha inviato un file/documento.\n\nRichiede attenzione manuale."
+                )
+                response_msg = "Ho ricevuto il tuo file. Ti risponderà presto un membro del nostro team. 😊"
+                await send_whatsapp_message(phone, response_msg, business)
+
+            elif message_type == "contacts":
+                send_alert_email(
+                    "👤 Contatto condiviso",
+                    f"L'utente {contact_name} ({phone}) ha condiviso un contatto.\n\nRichiede attenzione manuale."
+                )
+                response_msg = "Ho ricevuto il tuo contatto. Ti risponderà presto un membro del nostro team. 😊"
+                await send_whatsapp_message(phone, response_msg, business)
+
+            elif message_type == "sticker":
+                # Ignore stickers completely - no response, no email
+                logger.info(f"🔕 Sticker ricevuto da {phone}. Ignorato.")
+
+            elif message_type == "location":
+                send_alert_email(
+                    "📍 Posizione ricevuta",
+                    f"L'utente {contact_name} ({phone}) ha condiviso una posizione.\n\nRichiede attenzione manuale."
+                )
+                response_msg = "Ho ricevuto la tua posizione. Ti risponderà presto un membro del nostro team. 😊"
+                await send_whatsapp_message(phone, response_msg, business)
+
+            else:
+                # Unknown message type
+                logger.info(f"❓ Unknown message type: {message_type} from {phone}")
+                response_msg = "Posso rispondere solo a messaggi di testo. Come posso aiutarti? 💇‍♀️"
+                await send_whatsapp_message(phone, response_msg, business)
+
     except Exception as e:
         logger.error(f"Process message error: {e}")
+
+@app.post("/reload-config")
+async def reload_config():
+    """Force reload business config — called after dashboard changes."""
+    return JSONResponse({"status": "reloaded", "note": "Multi-tenant bot reloads config per-request from DB"})
+
 
 @app.get("/health")
 async def health_check():
@@ -2332,6 +4059,24 @@ async def root():
         "features": ["booking", "calendar", "AI", "tools_api", "strict_mode", "reminders"],
         "model": "gpt-4o",
         "services": [f"{s['name_it']} - €{s['price']}" for s in SALON_SERVICES.values()]
+    })
+
+@app.get("/sblocca_chat/{phone}")
+async def sblocca_chat(phone: str):
+    """Unblock a chat that was frozen due to complaint"""
+    if phone in chat_blocked:
+        reason = chat_blocked.pop(phone)
+        logger.info(f"✅ Chat unblocked for {phone} (was blocked for: {reason})")
+        return PlainTextResponse(f"✅ Chat sbloccata per {phone}\n\nMotivo blocco: {reason}")
+    else:
+        return PlainTextResponse(f"❌ Nessuna chat bloccata per {phone}", status_code=404)
+
+@app.get("/blocked_chats")
+async def list_blocked_chats():
+    """List all currently blocked chats"""
+    return JSONResponse({
+        "blocked_count": len(chat_blocked),
+        "blocked_chats": {phone: reason for phone, reason in chat_blocked.items()}
     })
 
 # ============================================================================
@@ -2385,13 +4130,150 @@ async def test_email():
         "sent_to": OWNER_EMAIL
     })
 
+@app.get("/test/conversations/{phone}")
+async def get_test_conversations(phone: str, limit: int = 5):
+    """Get recent conversations for testing purposes"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Normalize phone - handle partial matches
+        cur.execute("""
+            SELECT message, response, timestamp
+            FROM salon_conversations
+            WHERE phone LIKE %s
+            ORDER BY timestamp DESC
+            LIMIT %s
+        """, (f"%{phone}%", limit))
+
+        rows = cur.fetchall()
+        conversations = []
+        for r in rows:
+            conversations.append({
+                "customer": r[0][:200] if r[0] else "",
+                "bot": r[1][:300] if r[1] else "",
+                "time": str(r[2])
+            })
+
+        conn.close()
+        return JSONResponse({"conversations": conversations})
+    except Exception as e:
+        logger.error(f"Error getting conversations: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/test/conversations-by-date/{date}")
+async def get_conversations_by_date(date: str, limit: int = 50):
+    """Get conversations for a specific date (format: YYYY-MM-DD)"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT phone, name, message, response, timestamp
+            FROM salon_conversations
+            WHERE DATE(timestamp) = %s
+            ORDER BY timestamp ASC
+            LIMIT %s
+        """, (date, limit))
+
+        rows = cur.fetchall()
+        conversations = []
+        for r in rows:
+            conversations.append({
+                "phone": r[0],
+                "name": r[1],
+                "customer": r[2][:200] if r[2] else "",
+                "bot": r[3][:300] if r[3] else "",
+                "time": str(r[4])
+            })
+
+        conn.close()
+        return JSONResponse({"date": date, "count": len(conversations), "conversations": conversations})
+    except Exception as e:
+        logger.error(f"Error getting conversations by date: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/test/appointments/{phone}")
+async def get_test_appointments(phone: str):
+    """Get appointments for testing purposes"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT customer_name, service_type, appointment_date, appointment_time,
+                   status, reminder_confirmed, reminder_sent_at, reminder_confirmed_at
+            FROM salon_appointments
+            WHERE customer_phone LIKE %s
+            ORDER BY appointment_date DESC, appointment_time DESC
+            LIMIT 10
+        """, (f"%{phone}%",))
+
+        rows = cur.fetchall()
+        appointments = []
+        for r in rows:
+            appointments.append({
+                "name": r[0],
+                "service": r[1],
+                "date": str(r[2]),
+                "time": str(r[3]),
+                "status": r[4],
+                "reminder_confirmed": r[5],
+                "reminder_sent_at": str(r[6]) if r[6] else None,
+                "reminder_confirmed_at": str(r[7]) if r[7] else None
+            })
+
+        conn.close()
+        return JSONResponse({"appointments": appointments})
+    except Exception as e:
+        logger.error(f"Error getting appointments: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/test/buffer")
+async def get_buffer_state():
+    """Get current state of message buffer (for testing IMP-005)"""
+    buffer_state = {}
+    for phone, messages in pending_messages.items():
+        buffer_state[phone] = {
+            "count": len(messages),
+            "messages": messages,
+            "has_active_timer": phone in pending_timers
+        }
+
+    return JSONResponse({
+        "total_users_with_pending": len(pending_messages),
+        "buffer": buffer_state,
+        "batch_delay_seconds": MESSAGE_BATCH_DELAY_SECONDS
+    })
+
+@app.get("/test/buffer/{phone}")
+async def get_buffer_for_phone(phone: str):
+    """Get buffer state for specific phone (for testing IMP-005)"""
+    messages = pending_messages.get(phone, [])
+    return JSONResponse({
+        "phone": phone,
+        "count": len(messages),
+        "messages": messages,
+        "has_active_timer": phone in pending_timers
+    })
+
+@app.post("/test/buffer/clear")
+async def clear_all_buffers():
+    """Clear all message buffers (for testing)"""
+    # Cancel all pending timers
+    for phone, timer in list(pending_timers.items()):
+        timer.cancel()
+    pending_timers.clear()
+    pending_messages.clear()
+    return JSONResponse({"status": "cleared"})
+
 # ============================================================================
 # STARTUP
 # ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     logger.info("=" * 60)
     logger.info(f"🚀 STARTING {BUSINESS_NAME.upper()} WITH BOOKING")
     logger.info("=" * 60)
@@ -2400,13 +4282,29 @@ if __name__ == "__main__":
     logger.info(f"📅 Booking: ENABLED")
     logger.info(f"🤖 AI: Function Calling ENABLED")
     logger.info("=" * 60)
-    
+
     uvicorn.run(
         "salon_bot_with_booking:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=False,
         log_level="info"
     )
 
 
+
+@app.post("/test/simulate-reminder/{phone}")
+async def simulate_reminder(phone: str):
+    """Simulate a reminder being sent (for testing BUG-007)"""
+    reminder_msg = '''Buongiorno!😊
+Ti ricordiamo che domani alle ore 10:00 hai un appuntamento con noi.
+Ti chiediamo gentilmente di confermare rispondendo a questo messaggio.
+Grazie!'''
+
+    save_conversation_to_db(
+        phone=phone,
+        name='TestUser',
+        message='[SISTEMA: Promemoria appuntamento inviato automaticamente]',
+        response=reminder_msg
+    )
+    return JSONResponse({"status": "ok", "message": f"Simulated reminder for {phone}"})

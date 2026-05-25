@@ -37,7 +37,7 @@ async def show_hours(request: Request):
         hours_rows = cur.fetchall()
 
         cur.execute(
-            """SELECT id, closure_date::text, reason
+            """SELECT id, closure_date::text, reason, closure_end_date::text
                FROM business_closures WHERE business_id = %s ORDER BY closure_date""",
             (biz_id,),
         )
@@ -79,7 +79,7 @@ async def save_hours(request: Request):
                 (biz_id, day, is_open, open_time, close_time),
             )
 
-    tenant_service.invalidate(biz_id)
+    tenant_service.invalidate_by_business_id(biz_id)
     return RedirectResponse(url="/manage/hours/", status_code=302)
 
 
@@ -87,20 +87,30 @@ async def save_hours(request: Request):
 async def add_closure(
     request: Request,
     closure_date: str = Form(...),
+    closure_end_date: str = Form(""),
     reason: str = Form(""),
 ):
     user = _get_user(request)
     if not user:
         return RedirectResponse(url="/manage/login", status_code=302)
 
+    end_date = closure_end_date.strip() or None
+
     with get_connection() as conn:
         cur = conn.cursor()
+        # Swap if end < start
+        if end_date and end_date < closure_date:
+            closure_date, end_date = end_date, closure_date
+
         cur.execute(
-            "INSERT INTO business_closures (business_id, closure_date, reason) VALUES (%s, %s, %s)",
-            (user["business_id"], closure_date, reason or None),
+            """INSERT INTO business_closures (business_id, closure_date, closure_end_date, reason)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (business_id, closure_date) DO UPDATE
+               SET closure_end_date = EXCLUDED.closure_end_date, reason = EXCLUDED.reason""",
+            (user["business_id"], closure_date, end_date, reason or None),
         )
 
-    tenant_service.invalidate(user["business_id"])
+    tenant_service.invalidate_by_business_id(user["business_id"])
     return RedirectResponse(url="/manage/hours/", status_code=302)
 
 
@@ -117,5 +127,5 @@ async def delete_closure(request: Request, closure_id: int):
             (closure_id, user["business_id"]),
         )
 
-    tenant_service.invalidate(user["business_id"])
+    tenant_service.invalidate_by_business_id(user["business_id"])
     return RedirectResponse(url="/manage/hours/", status_code=302)
