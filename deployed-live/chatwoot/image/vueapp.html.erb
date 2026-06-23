@@ -77,9 +77,10 @@
     <%= vite_javascript_tag @application_pack %>
     <script>
       (function(){
+        // Default to light. Only go dark if the user explicitly chose it via the
+        // toggle (lyo-theme). OS prefers-color-scheme is intentionally ignored.
         var s = localStorage.getItem('lyo-theme');
-        var d = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        if (s === 'dark' || (s === null && d)) {
+        if (s === 'dark') {
           document.documentElement.classList.add('dark');
         } else {
           document.documentElement.classList.remove('dark');

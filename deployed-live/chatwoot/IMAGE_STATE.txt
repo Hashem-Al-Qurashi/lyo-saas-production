@@ -1,6 +1,7 @@
 running_image_sha=sha256:da4c01257e73cddb9c06315beb75f0659d2e8e89a111c5f7b7524480ed5dda4d
-chatwoot-lyo:latest 9f15e8cf9667 5 days ago
-agsol-chatwoot:branded ef365368f452 2 weeks ago
+chatwoot-lyo:latest 5e3a7ba7c092 2 minutes ago
+<none>:<none> 9f15e8cf9667 6 days ago
+agsol-chatwoot:branded ef365368f452 3 weeks ago
 chatwoot/chatwoot:latest df2dcd134a31 2 months ago
 redis:alpine 13b871aaf97f 2 months ago
 pgvector/pgvector:pg16 8ed3192326bb 3 months ago
