@@ -1,0 +1,47 @@
+version: '3'
+
+services:
+  base: &base
+    image: chatwoot-lyo:latest
+    env_file: .env
+    volumes:
+      - storage_data:/app/storage
+      - ./brand-assets:/app/public/brand-assets:ro
+      - ./sessions_controller.rb:/app/app/controllers/devise_overrides/sessions_controller.rb:ro
+
+  rails:
+    <<: *base
+    depends_on:
+      - redis
+    ports:
+      - '0.0.0.0:3000:3000'
+    environment:
+      - NODE_ENV=production
+      - RAILS_ENV=production
+      - INSTALLATION_ENV=docker
+    entrypoint: docker/entrypoints/rails.sh
+    command: ['bundle', 'exec', 'rails', 's', '-p', '3000', '-b', '0.0.0.0']
+    restart: always
+
+  sidekiq:
+    <<: *base
+    depends_on:
+      - redis
+    environment:
+      - NODE_ENV=production
+      - RAILS_ENV=production
+      - INSTALLATION_ENV=docker
+    command: ['bundle', 'exec', 'sidekiq', '-C', 'config/sidekiq.yml']
+    restart: always
+
+  redis:
+    image: redis:alpine
+    restart: always
+    command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
+    env_file: .env
+    volumes:
+      - redis_data:/data
+
+volumes:
+  storage_data:
+  redis_data:
