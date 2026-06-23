@@ -3,6 +3,7 @@ AURA HAIR STUDIO - WhatsApp Bot with Calendar/Booking Integration
 OpenAI Tools API with strict mode for reliable function calling
 """
 import os
+import hmac
 import asyncio
 import logging
 import json
@@ -94,6 +95,10 @@ else:
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "950083738197862")
 WHATSAPP_WEBHOOK_VERIFY_TOKEN = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "lyosaas2024")
+
+# Shared secret authenticating Chatwoot -> bot webhooks (Chatwoot custom webhooks
+# cannot send custom headers, so the secret rides in the URL as ?token=...).
+CHATWOOT_WEBHOOK_SECRET = os.getenv("CHATWOOT_WEBHOOK_SECRET", "")
 
 # Instagram Configuration
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
@@ -217,6 +222,12 @@ async def process_buffered_messages(phone: str):
 
         # Mirror the customer message into Chatwoot so agents see the conversation
         await _chatwoot_push("in", phone, combined_text, contact_name)
+
+        # Human takeover: if an agent is handling this chat in Chatwoot, suspend
+        # the AI. The customer message is still mirrored above so the agent sees it.
+        if chatwoot_bridge.has_human_takeover(phone):
+            logger.info(f"🙋 Human takeover active for {phone} — skipping AI reply")
+            return
 
         # Extract business info for multi-tenant
         business = biz_context["business"] if biz_context else {}
@@ -3810,6 +3821,8 @@ async def startup():
     """Initialize on startup"""
     initialize_database()
     setup_reminder_scheduler()
+    # Durable human-takeover store (survives restarts). Falls back to in-memory.
+    chatwoot_bridge.init_takeover_store(get_db_connection)
     logger.info(f"🚀 {BUSINESS_NAME} WhatsApp + Instagram Bot started!")
 
 @app.get("/webhook")
@@ -3824,6 +3837,48 @@ async def verify_webhook(request: Request):
         return PlainTextResponse(challenge)
 
     return PlainTextResponse("Failed", status_code=403)
+
+@app.post("/webhook/chatwoot")
+async def chatwoot_webhook(request: Request):
+    """Inbound Chatwoot events: deliver human-agent replies to the customer over
+    WhatsApp and toggle the AI-suspend (human takeover) flag.
+
+    Auth: Chatwoot custom webhooks cannot add headers, so the shared secret is
+    passed as ?token=... in the configured webhook URL.
+    """
+    # --- authenticate (fail closed) ---
+    if not CHATWOOT_WEBHOOK_SECRET:
+        logger.error("CHATWOOT_WEBHOOK_SECRET not configured — rejecting webhook")
+        return JSONResponse({"status": "not_configured"}, status_code=503)
+    token = request.query_params.get("token", "")
+    if not hmac.compare_digest(token, CHATWOOT_WEBHOOK_SECRET):
+        return JSONResponse({"status": "forbidden"}, status_code=403)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"status": "bad_request"}, status_code=400)
+
+    decision = chatwoot_bridge.classify_webhook_event(payload)
+    action = decision.get("action")
+
+    if action == "forward":
+        phone = decision["phone"]
+        content = decision["content"]
+        chatwoot_bridge.mark_human_takeover(phone)
+        await send_whatsapp_message(phone, content)
+        logger.info(f"➡️ Forwarded agent reply to {phone} (takeover ON)")
+        return JSONResponse({"status": "forwarded"})
+
+    if action == "clear_takeover":
+        phone = decision.get("phone")
+        if phone:
+            chatwoot_bridge.clear_human_takeover(phone)
+            logger.info(f"✅ Conversation resolved — takeover OFF for {phone}")
+        return JSONResponse({"status": "takeover_cleared"})
+
+    return JSONResponse({"status": "ignored", "reason": decision.get("reason")})
+
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -3944,6 +3999,23 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
         if phone in chat_blocked:
             logger.info(f"🔒 Chat blocked for {phone}, ignoring message")
             return  # Don't respond to blocked chats
+
+        # Human takeover: an agent is handling this chat in Chatwoot -> suspend the
+        # AI for every reply path below. Still mirror the customer's message so the
+        # agent sees it in the dashboard.
+        if chatwoot_bridge.has_human_takeover(phone):
+            if message_type == "text":
+                mirror_text = message.get("text", {}).get("body", "")
+            elif message_type == "interactive":
+                interactive = message.get("interactive", {})
+                mirror_text = (interactive.get("button_reply", {}).get("title", "")
+                               or interactive.get("list_reply", {}).get("title", ""))
+            else:
+                mirror_text = f"[{message_type} message]"
+            if mirror_text:
+                await _chatwoot_push("in", phone, mirror_text, contact_name)
+            logger.info(f"🙋 Human takeover active for {phone} — AI suspended")
+            return
 
         if message_type == "text":
             text = message.get("text", {}).get("body", "")
