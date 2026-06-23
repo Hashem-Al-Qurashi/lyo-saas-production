@@ -3870,6 +3870,13 @@ async def chatwoot_webhook(request: Request):
         logger.info(f"➡️ Forwarded agent reply to {phone} (takeover ON)")
         return JSONResponse({"status": "forwarded"})
 
+    if action == "set_takeover":
+        phone = decision.get("phone")
+        if phone:
+            chatwoot_bridge.mark_human_takeover(phone)
+            logger.info(f"🏷️ bot_paused label detected — takeover ON for {phone}")
+        return JSONResponse({"status": "takeover_set"})
+
     if action == "clear_takeover":
         phone = decision.get("phone")
         if phone:

@@ -122,6 +122,42 @@ def test_classify_open_status_change_is_ignored():
     assert res["action"] == "ignore"
 
 
+def test_classify_bot_paused_label_sets_takeover():
+    payload = {
+        "event": "conversation_updated",
+        "status": "open",
+        "labels": ["bot_paused"],
+        "meta": {"sender": {"phone_number": "+393331112222"}},
+    }
+    res = cb.classify_webhook_event(payload)
+    assert res["action"] == "set_takeover"
+    assert res["phone"] == "+393331112222"
+
+
+def test_classify_bot_paused_label_nested_in_conversation():
+    payload = {
+        "event": "conversation_updated",
+        "status": "open",
+        "conversation": {
+            "labels": ["bot_paused"],
+            "meta": {"sender": {"phone_number": "+393331112222"}},
+        },
+    }
+    res = cb.classify_webhook_event(payload)
+    assert res["action"] == "set_takeover"
+
+
+def test_classify_updated_without_bot_paused_label_is_ignored():
+    payload = {
+        "event": "conversation_updated",
+        "status": "open",
+        "labels": ["vip"],
+        "meta": {"sender": {"phone_number": "+393331112222"}},
+    }
+    res = cb.classify_webhook_event(payload)
+    assert res["action"] == "ignore"
+
+
 def test_classify_unhandled_event():
     res = cb.classify_webhook_event({"event": "contact_created"})
     assert res["action"] == "ignore"

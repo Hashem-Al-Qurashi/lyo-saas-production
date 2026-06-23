@@ -406,6 +406,18 @@ def classify_webhook_event(payload: dict) -> Dict[str, Any]:
         status = payload.get("status") or (payload.get("conversation") or {}).get("status")
         if status == "resolved":
             return {"action": "clear_takeover", "phone": phone_from_conversation_payload(payload)}
+
+        # Label-based pause: if the conversation has 'bot_paused' label, suspend AI immediately
+        # without waiting for an agent to type a reply. Labels live at payload["labels"] or
+        # payload["conversation"]["labels"] depending on Chatwoot version.
+        conv_labels = (
+            payload.get("labels")
+            or (payload.get("conversation") or {}).get("labels")
+            or []
+        )
+        if "bot_paused" in conv_labels:
+            return {"action": "set_takeover", "phone": phone_from_conversation_payload(payload)}
+
         return {"action": "ignore", "reason": "status_not_resolved"}
 
     if event != "message_created":
