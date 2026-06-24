@@ -147,11 +147,23 @@ def test_classify_bot_paused_label_nested_in_conversation():
     assert res["action"] == "set_takeover"
 
 
-def test_classify_updated_without_bot_paused_label_is_ignored():
+def test_classify_bot_paused_label_removed_clears_takeover():
+    cb.mark_human_takeover("+393331112222")
     payload = {
         "event": "conversation_updated",
         "status": "open",
-        "labels": ["vip"],
+        "labels": ["vip"],  # bot_paused is gone
+        "meta": {"sender": {"phone_number": "+393331112222"}},
+    }
+    res = cb.classify_webhook_event(payload)
+    assert res["action"] == "clear_takeover"
+
+
+def test_classify_updated_without_labels_field_is_ignored():
+    # No labels field at all → can't infer label state → ignore
+    payload = {
+        "event": "conversation_updated",
+        "status": "open",
         "meta": {"sender": {"phone_number": "+393331112222"}},
     }
     res = cb.classify_webhook_event(payload)
