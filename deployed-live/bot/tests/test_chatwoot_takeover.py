@@ -159,6 +159,19 @@ def test_classify_bot_paused_label_removed_clears_takeover():
     assert res["action"] == "clear_takeover"
 
 
+def test_classify_empty_labels_clears_takeover():
+    """Empty labels list [] is falsy in Python but IS valid — means all labels removed."""
+    cb.mark_human_takeover("+393331112222")
+    payload = {
+        "event": "conversation_updated",
+        "status": "open",
+        "labels": [],  # all labels removed including bot_paused
+        "meta": {"sender": {"phone_number": "+393331112222"}},
+    }
+    res = cb.classify_webhook_event(payload)
+    assert res["action"] == "clear_takeover"
+
+
 def test_classify_updated_without_labels_field_is_ignored():
     # No labels field at all → can't infer label state → ignore
     payload = {

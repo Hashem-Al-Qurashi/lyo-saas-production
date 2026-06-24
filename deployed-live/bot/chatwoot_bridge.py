@@ -409,8 +409,10 @@ def classify_webhook_event(payload: dict) -> Dict[str, Any]:
 
         # Label-based pause/resume. Labels live at payload["labels"] or
         # payload["conversation"]["labels"] depending on Chatwoot version.
-        # Only act when the payload actually carries label information.
-        conv_labels = payload.get("labels") or (payload.get("conversation") or {}).get("labels")
+        # Use explicit None checks — [] is falsy but IS valid label info (all removed).
+        conv_labels = payload.get("labels")
+        if conv_labels is None:
+            conv_labels = (payload.get("conversation") or {}).get("labels")
         if conv_labels is not None:
             if "bot_paused" in conv_labels:
                 return {"action": "set_takeover", "phone": phone_from_conversation_payload(payload)}
