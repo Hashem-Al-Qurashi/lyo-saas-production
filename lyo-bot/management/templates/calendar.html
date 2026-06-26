@@ -1,130 +1,502 @@
 {% extends "base.html" %}
-{% block title %}Calendario - Lyo Management{% endblock %}
+{% block title %}Calendario - Lyo Virtual Assistant{% endblock %}
+{% block head %}
+<link href="https://cdn.jsdelivr.net/npm/fullcalendar-scheduler@6.1.11/index.global.min.css" rel="stylesheet">
+{% endblock %}
 {% block content %}
-<div class="flex justify-between items-center mb-4">
-    <h1 class="text-2xl font-bold">Calendario</h1>
-    <a href="/manage/appointments/" class="text-sm text-indigo-600 hover:text-indigo-800">Vista tabella &rarr;</a>
+<div class="flex items-center justify-between mb-6">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900 tracking-tight">Calendario</h1>
+        <p class="text-sm text-gray-500 mt-1">Vista giornaliera degli operatori</p>
+    </div>
+    <div class="flex items-center gap-3">
+        <button id="btn-new-appt" class="btn-primary text-sm flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+            Nuovo appuntamento
+        </button>
+    </div>
 </div>
 
-<div id="calendar" class="bg-white rounded-lg shadow p-4"></div>
+<div class="card p-0 sm:p-0">
+    <div id="calendar" class="p-3 sm:p-4"></div>
+</div>
 
-<!-- FullCalendar v6 CDN -->
-<link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.css" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@fullcalendar/resource@6.1.11/index.global.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@fullcalendar/resource-timegrid@6.1.11/index.global.min.js"></script>
+<!-- Detail Panel (slide-in from right) -->
+<div id="detail-panel" class="fixed top-0 right-0 h-full w-80 bg-white shadow-2xl z-50 transform translate-x-full transition-transform duration-300 ease-in-out flex flex-col">
+    <div class="flex items-center justify-between p-4 border-b border-gray-100">
+        <h2 class="text-base font-semibold text-gray-900">Dettaglio appuntamento</h2>
+        <button id="panel-close" class="text-gray-400 hover:text-gray-600 p-1 rounded">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+    </div>
+    <div class="flex-1 overflow-y-auto p-4 space-y-4">
+        <div>
+            <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Cliente</p>
+            <p id="pd-name" class="font-semibold text-gray-900 text-sm"></p>
+            <p id="pd-phone" class="text-gray-500 text-sm mt-0.5"></p>
+        </div>
+        <div>
+            <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Trattamento</p>
+            <p id="pd-treatment" class="text-gray-800 text-sm"></p>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+            <div>
+                <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Orario</p>
+                <p id="pd-time" class="text-gray-800 text-sm font-medium"></p>
+            </div>
+            <div>
+                <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Prezzo</p>
+                <p id="pd-price" class="text-gray-800 text-sm font-medium"></p>
+            </div>
+        </div>
+        <div>
+            <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Operatore</p>
+            <p id="pd-operator" class="text-gray-800 text-sm"></p>
+        </div>
+        <div>
+            <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Stato</p>
+            <span id="pd-status-badge" class="inline-block px-2 py-0.5 rounded-full text-xs font-medium"></span>
+        </div>
+    </div>
+</div>
+
+<!-- Overlay for detail panel -->
+<div id="panel-overlay" class="fixed inset-0 bg-black/20 z-40 hidden"></div>
+
+<!-- New Appointment Modal -->
+<div id="new-appt-modal" class="fixed inset-0 bg-black/40 z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md">
+        <div class="flex items-center justify-between p-5 border-b border-gray-100">
+            <h2 class="text-base font-semibold text-gray-900">Nuovo appuntamento</h2>
+            <button id="modal-close" class="text-gray-400 hover:text-gray-600 p-1 rounded">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <form id="new-appt-form" class="p-5 space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 mb-1">Data <span class="text-red-500">*</span></label>
+                    <input id="na-date" type="date" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 mb-1">Orario <span class="text-red-500">*</span></label>
+                    <input id="na-time" type="time" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+                </div>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Trattamento <span class="text-red-500">*</span></label>
+                <select id="na-treatment" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+                    <option value="">Seleziona trattamento...</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Operatore</label>
+                <select id="na-operator" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+                    <option value="">Non assegnato</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Nome cliente <span class="text-red-500">*</span></label>
+                <input id="na-name" type="text" required placeholder="Es. Marco Rossi" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Telefono <span class="text-red-500">*</span></label>
+                <input id="na-phone" type="tel" required placeholder="Es. 3901234567" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+            </div>
+            <div id="na-error" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+            <div class="flex gap-3 pt-1">
+                <button type="button" id="modal-cancel-btn" class="flex-1 btn-secondary text-sm">Annulla</button>
+                <button type="submit" id="na-submit" class="flex-1 btn-primary text-sm">Prenota</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar-scheduler@6.1.11/index.global.min.js"></script>
 
 <script>
-document.addEventListener('DOMContentLoaded', function() {
+(function() {
     var csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
     var calendarEl = document.getElementById('calendar');
+    var isDragging = false;
+    var pendingDropFetch = 0;  // counts in-flight drag-drop fetches
+    var refreshInterval = null;
+    var treatmentData = [];
+    var operatorData = [];
 
+    // --- Status badge helpers ---
+    var STATUS_LABELS = {confirmed: 'Confermato', completed: 'Completato', cancelled: 'Cancellato'};
+    var STATUS_CLASSES = {
+        confirmed: 'bg-green-100 text-green-800',
+        completed: 'bg-blue-100 text-blue-800',
+        cancelled: 'bg-red-100 text-red-800',
+    };
+
+    // --- Detail panel ---
+    var panel = document.getElementById('detail-panel');
+    var overlay = document.getElementById('panel-overlay');
+
+    function openPanel(evt) {
+        var props = evt.extendedProps;
+        document.getElementById('pd-name').textContent = props.customerName || evt.title.split('\n')[0] || '-';
+        document.getElementById('pd-phone').textContent = props.phone || '-';
+        document.getElementById('pd-treatment').textContent = props.treatmentName || evt.title.split('\n')[1] || '-';
+        document.getElementById('pd-operator').textContent = props.operator || 'Non assegnato';
+        document.getElementById('pd-price').textContent = props.price ? '€' + props.price.toFixed(2) : '-';
+
+        // Use startStr/endStr (FullCalendar timezone-aware ISO strings) to avoid toLocaleTimeString TZ bugs
+        var timeStr = evt.startStr ? evt.startStr.slice(11, 16) : '-';
+        if (evt.endStr) timeStr += ' – ' + evt.endStr.slice(11, 16);
+        document.getElementById('pd-time').textContent = timeStr;
+
+        var statusBadge = document.getElementById('pd-status-badge');
+        var status = props.status || 'confirmed';
+        statusBadge.textContent = STATUS_LABELS[status] || status;
+        statusBadge.className = 'inline-block px-2 py-0.5 rounded-full text-xs font-medium ' + (STATUS_CLASSES[status] || 'bg-gray-100 text-gray-800');
+
+        panel.classList.remove('translate-x-full');
+        overlay.classList.remove('hidden');
+    }
+
+    function closePanel() {
+        panel.classList.add('translate-x-full');
+        overlay.classList.add('hidden');
+    }
+
+    document.getElementById('panel-close').addEventListener('click', closePanel);
+    overlay.addEventListener('click', closePanel);
+
+    // --- New appointment modal ---
+    var modal = document.getElementById('new-appt-modal');
+
+    function openModal(dateStr, timeStr, operatorId) {
+        document.getElementById('na-date').value = dateStr || '';
+        document.getElementById('na-time').value = timeStr || '';
+        document.getElementById('na-name').value = '';
+        document.getElementById('na-phone').value = '';
+        document.getElementById('na-error').classList.add('hidden');
+        // Pre-select operator
+        var opSel = document.getElementById('na-operator');
+        opSel.value = operatorId && operatorId !== 'unassigned' ? String(operatorId) : '';
+        modal.classList.remove('hidden');
+    }
+
+    function closeModal() {
+        modal.classList.add('hidden');
+    }
+
+    document.getElementById('modal-close').addEventListener('click', closeModal);
+    document.getElementById('modal-cancel-btn').addEventListener('click', closeModal);
+    document.getElementById('btn-new-appt').addEventListener('click', function() {
+        openModal('', '', null);
+    });
+    modal.addEventListener('click', function(e) {
+        if (e.target === modal) closeModal();
+    });
+
+    // Load treatments and operators for the modal
+    function loadModalData() {
+        fetch('/manage/api/treatments')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                treatmentData = data;
+                var sel = document.getElementById('na-treatment');
+                data.forEach(function(t) {
+                    var opt = document.createElement('option');
+                    opt.value = t.id;
+                    opt.textContent = t.name + ' (' + t.duration + 'min – €' + t.price.toFixed(2) + ')';
+                    sel.appendChild(opt);
+                });
+            });
+
+        fetch('/manage/api/operators')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                operatorData = data;
+                var sel = document.getElementById('na-operator');
+                data.forEach(function(op) {
+                    if (op.id === 'unassigned') return;
+                    var opt = document.createElement('option');
+                    opt.value = op.id;
+                    opt.textContent = op.title;
+                    sel.appendChild(opt);
+                });
+            });
+    }
+    loadModalData();
+
+    // Form submit
+    document.getElementById('new-appt-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        var errEl = document.getElementById('na-error');
+        errEl.classList.add('hidden');
+        var submitBtn = document.getElementById('na-submit');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Salvataggio...';
+
+        var treatId = parseInt(document.getElementById('na-treatment').value);
+        var opVal = document.getElementById('na-operator').value;
+        var opId = opVal ? parseInt(opVal) : null;
+
+        fetch('/manage/api/appointments', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+            body: JSON.stringify({
+                customer_name: document.getElementById('na-name').value.trim(),
+                customer_phone: document.getElementById('na-phone').value.trim(),
+                treatment_id: treatId,
+                operator_id: opId,
+                appointment_date: document.getElementById('na-date').value,
+                appointment_time: document.getElementById('na-time').value,
+            })
+        })
+        .then(function(resp) {
+            if (!resp.ok) return resp.json().then(function(d) { throw new Error(d.error || 'Errore'); });
+            return resp.json();
+        })
+        .then(function() {
+            closeModal();
+            calendar.refetchEvents();
+            showToast('Appuntamento creato', 'success');
+        })
+        .catch(function(err) {
+            errEl.textContent = err.message;
+            errEl.classList.remove('hidden');
+        })
+        .finally(function() {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Prenota';
+        });
+    });
+
+    // --- FullCalendar ---
     var calendar = new FullCalendar.Calendar(calendarEl, {
         schedulerLicenseKey: 'GPL-My-Project-Is-Open-Source',
         initialView: 'resourceTimeGridDay',
         headerToolbar: {
             left: 'prev,next today',
             center: 'title',
-            right: 'resourceTimeGridDay,timeGridWeek'
+            right: 'resourceTimeGridDay,timeGridWeek,dayGridMonth'
         },
         locale: 'it',
         timeZone: 'Europe/Rome',
         slotMinTime: '08:00:00',
         slotMaxTime: '21:00:00',
         slotDuration: '00:15:00',
+        slotLabelFormat: {hour: 'numeric', minute: '2-digit', hour12: false},
         allDaySlot: false,
         editable: true,
         eventDurationEditable: false,
-        height: 'auto',
+        height: 'calc(100vh - 200px)',
+        expandRows: true,
+        stickyHeaderDates: true,
 
-        resources: {
-            url: '/manage/api/operators',
-            method: 'GET'
+        resources: function(fetchInfo, successCallback, failureCallback) {
+            var dateStr = calendar ? calendar.getDate().toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+            fetch('/manage/api/operators?date=' + dateStr)
+                .then(function(r) { return r.json(); })
+                .then(successCallback)
+                .catch(failureCallback);
         },
+        events: {url: '/manage/api/appointments', method: 'GET'},
 
-        events: {
-            url: '/manage/api/appointments',
-            method: 'GET'
-        },
+        // Hide "Non assegnato" column when no events use it.
+        // filterResourcesWithEvents lets FullCalendar do this natively without
+        // touching its internal DOM (direct DOM manipulation caused render loops).
+        filterResourcesWithEvents: true,
 
         eventDrop: function(info) {
             var evt = info.event;
             var newResource = evt.getResources()[0];
+            // Use startStr (FullCalendar timezone-aware ISO string) instead of toTimeString()
+            var newDate = evt.startStr.slice(0, 10);
+            var newTime = evt.startStr.slice(11, 16);
+            // null if dragged to "unassigned", integer if real operator
+            var newOpId = (newResource && newResource.id !== 'unassigned')
+                ? parseInt(newResource.id)
+                : null;
+
+            pendingDropFetch++;
             fetch('/manage/api/appointments/' + evt.id + '/move', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': csrfToken
-                },
+                headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
                 body: JSON.stringify({
-                    new_date: evt.start.toISOString().slice(0, 10),
-                    new_time: evt.start.toTimeString().slice(0, 5),
-                    new_operator_id: newResource ? parseInt(newResource.id) : null
+                    new_date: newDate,
+                    new_time: newTime,
+                    new_operator_id: newOpId,
                 })
-            }).then(function(resp) {
+            })
+            .then(function(resp) {
                 if (!resp.ok) {
                     info.revert();
-                    alert('Errore nello spostamento');
+                    showToast('Errore nello spostamento', 'error');
+                } else {
+                    showToast('Appuntamento spostato', 'success');
                 }
-            }).catch(function() {
+            })
+            .catch(function() {
                 info.revert();
-                alert('Errore di rete');
+                showToast('Errore di rete', 'error');
+            })
+            .finally(function() {
+                pendingDropFetch--;
             });
         },
 
         eventClick: function(info) {
-            var props = info.event.extendedProps;
-            alert(
-                info.event.title + '\n' +
-                'Tel: ' + (props.phone || '-') + '\n' +
-                'Operatore: ' + (props.operator || '-') + '\n' +
-                'Stato: ' + (props.status || '-') + '\n' +
-                'Prezzo: \u20ac' + (props.price || 0)
-            );
+            openPanel(info.event);
         },
 
-        windowResize: function(arg) {
-            if (window.innerWidth < 768) {
-                calendar.changeView('listDay');
-            } else {
-                if (calendar.view.type === 'listDay') {
+        dateClick: function(info) {
+            // In month view, drill into the clicked day
+            if (info.view.type === 'dayGridMonth') {
+                calendar.gotoDate(info.dateStr);
+                calendar.changeView('resourceTimeGridDay');
+                return;
+            }
+            // Only trigger modal on day view to avoid confusing multi-day clicks in week view
+            if (info.view.type !== 'resourceTimeGridDay') return;
+            var timeStr = info.dateStr.slice(11, 16);
+            var dateStr = info.dateStr.slice(0, 10);
+            var resourceId = info.resource ? info.resource.id : null;
+            openModal(dateStr, timeStr, resourceId);
+        },
+
+        eventDidMount: function(info) {
+            // Track drag start/end to pause auto-refresh during drags
+            info.el.addEventListener('mousedown', function() { isDragging = true; });
+        },
+
+        datesSet: function() {
+            // Refetch operators when date changes so non-working operators are hidden
+            calendar.refetchResources();
+        },
+
+        windowResize: function() {
+            // Debounced — FullCalendar calls this on every pixel of resize
+            clearTimeout(calendar._resizeTimer);
+            calendar._resizeTimer = setTimeout(function() {
+                if (window.innerWidth < 768) {
+                    calendar.changeView('listDay');
+                } else if (calendar.view.type === 'listDay') {
                     calendar.changeView('resourceTimeGridDay');
                 }
-            }
+            }, 150);
         }
     });
 
-    calendar.render();
+    // Expose globally for debugging
+    window._calendar = calendar;
 
-    if (window.innerWidth < 768) {
-        calendar.changeView('listDay');
+    calendar.render();
+    if (window.innerWidth < 768) calendar.changeView('listDay');
+
+    // Reset drag flag on mouseup/touchend — also use a safety timeout so a
+    // missed mouseup (released outside browser window) doesn't freeze auto-refresh.
+    var dragResetTimer = null;
+    function resetDrag() {
+        isDragging = false;
+        clearTimeout(dragResetTimer);
     }
-});
+    document.addEventListener('mouseup', resetDrag);
+    document.addEventListener('touchend', resetDrag);
+    document.addEventListener('mousemove', function() {
+        // If mouse moves but isDragging is stuck, reset after 5s of inactivity
+        if (isDragging) {
+            clearTimeout(dragResetTimer);
+            dragResetTimer = setTimeout(resetDrag, 5000);
+        }
+    });
+
+    // Auto-refresh every 30s — skip if dragging or a drop fetch is in-flight
+    refreshInterval = setInterval(function() {
+        if (!isDragging && pendingDropFetch === 0 && modal.classList.contains('hidden')) {
+            calendar.refetchEvents();
+        }
+    }, 30000);
+
+    // Clear interval on page unload so it doesn't fire after navigation
+    window.addEventListener('beforeunload', function() {
+        clearInterval(refreshInterval);
+    });
+
+})();
 </script>
 
 <style>
     .fc .fc-button-primary {
-        background-color: #4f46e5 !important;
-        border-color: #4f46e5 !important;
+        background: #0084d2 !important;
+        border: none !important;
+        border-radius: 0.5rem !important;
+        font-size: 0.8125rem !important;
+        font-weight: 500 !important;
+        padding: 0.375rem 0.75rem !important;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
     }
     .fc .fc-button-primary:hover {
-        background-color: #4338ca !important;
+        background: #006bad !important;
     }
     .fc .fc-button-primary:not(:disabled).fc-button-active {
-        background-color: #3730a3 !important;
+        background: #005a91 !important;
     }
-    .fc .fc-today-button {
-        text-transform: capitalize;
-    }
+    .fc .fc-today-button { text-transform: capitalize; }
     .fc-event {
         cursor: pointer;
         border: none !important;
         font-size: 0.75rem;
-        padding: 2px 4px;
+        padding: 3px 6px;
+        border-radius: 0.375rem !important;
     }
     .fc .fc-col-header-cell {
         background-color: #f9fafb;
         font-weight: 600;
+        font-size: 0.8125rem;
+        color: #374151;
+    }
+    .fc .fc-col-header-cell-cushion {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: #374151;
+        text-decoration: none !important;
+    }
+    .fc .fc-timegrid-slot { height: 2.5em; }
+    .fc .fc-timegrid-slot-label-cushion {
+        font-size: 0.75rem;
+        color: #6b7280;
+    }
+    .fc-theme-standard td, .fc-theme-standard th {
+        border-color: #f3f4f6 !important;
+    }
+    /* Remove yellow today highlight */
+    .fc .fc-timegrid-col.fc-day-today,
+    .fc .fc-daygrid-day.fc-day-today {
+        background: rgba(0, 132, 210, 0.04) !important;
+    }
+    /* Day numbers in month view */
+    .fc .fc-daygrid-day-number {
+        font-size: 0.8125rem;
+        font-weight: 500;
+        color: #374151;
+        text-decoration: none !important;
+    }
+    .fc .fc-daygrid-day.fc-day-today .fc-daygrid-day-number {
+        background: #0084d2;
+        color: #fff;
+        border-radius: 50%;
+        width: 1.5rem;
+        height: 1.5rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    /* "Non assegnato" column header — muted style when visible */
+    .fc-col-header-cell[data-resource-id="unassigned"] {
+        background-color: #f3f4f6;
+        color: #9ca3af;
+        font-style: italic;
+    }
+    .fc-timegrid-col[data-resource-id="unassigned"] {
+        background-color: #fafafa;
     }
 </style>
 {% endblock %}
