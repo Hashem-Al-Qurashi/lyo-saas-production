@@ -29,6 +29,15 @@
       <link rel="manifest" href="/manifest.json">
     <% end %>
     <link rel="icon" type="image/png" sizes="512x512" href="<%= @global_config['LOGO_THUMBNAIL'] %>">
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-icon-180x180.png">
+    <link rel="apple-touch-icon" sizes="152x152" href="/apple-icon-152x152.png">
+    <link rel="apple-touch-icon" sizes="144x144" href="/apple-icon-144x144.png">
+    <link rel="apple-touch-icon" sizes="120x120" href="/apple-icon-120x120.png">
+    <link rel="apple-touch-icon" sizes="114x114" href="/apple-icon-114x114.png">
+    <link rel="apple-touch-icon" sizes="76x76" href="/apple-icon-76x76.png">
+    <link rel="apple-touch-icon" sizes="72x72" href="/apple-icon-72x72.png">
+    <link rel="apple-touch-icon" sizes="60x60" href="/apple-icon-60x60.png">
+    <link rel="apple-touch-icon" sizes="57x57" href="/apple-icon-57x57.png">
     <%= csrf_meta_tags %>
     <script>
       window.chatwootConfig = {
@@ -70,6 +79,14 @@
       }
     </script>
     <% end %>
+    <style>
+      /* Chatwoot's compiled CSS has a late @supports .bg-n-brand/5 rule that
+         wins over dark:bg-n-background at the same specificity via source order.
+         This !important override restores the dark page background. */
+      .dark main {
+        background-color: rgb(18, 18, 19) !important;
+      }
+    </style>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
@@ -77,11 +94,27 @@
     <%= vite_javascript_tag @application_pack %>
     <script>
       (function(){
-        // Default to light. Only go dark if the user explicitly chose it via the
-        // toggle (lyo-theme). OS prefers-color-scheme is intentionally ignored.
+        // Runs in <head> before any scripts — document.body is null here.
+        // The compiled v3app setColorTheme() ONLY reads window.matchMedia(
+        // "(prefers-color-scheme: dark)").matches — it ignores localStorage.
+        // When the user picks dark via our toggle, we must override matchMedia
+        // so Vue's mounted() hook sees dark and does classList.add("dark") itself
+        // instead of stripping what we set.
         var s = localStorage.getItem('lyo-theme');
         if (s === 'dark') {
           document.documentElement.classList.add('dark');
+          var _orig = window.matchMedia.bind(window);
+          window.matchMedia = function(q) {
+            if (q === '(prefers-color-scheme: dark)') {
+              return {
+                matches: true, media: q, onchange: null,
+                addListener: function(){}, removeListener: function(){},
+                addEventListener: function(){}, removeEventListener: function(){},
+                dispatchEvent: function(){ return false; }
+              };
+            }
+            return _orig(q);
+          };
         } else {
           document.documentElement.classList.remove('dark');
         }
@@ -99,7 +132,9 @@
     <script>
       function lyoToggleTheme(){
         var dark = document.documentElement.classList.toggle('dark');
+        document.body.classList.toggle('dark', dark);
         localStorage.setItem('lyo-theme', dark ? 'dark' : 'light');
+        localStorage.setItem('color_scheme', dark ? 'dark' : 'light');
         document.getElementById('lyo-toggle').textContent = dark ? '☀️' : '🌙';
       }
       (function(){
