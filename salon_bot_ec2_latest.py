@@ -3,6 +3,7 @@ AURA HAIR STUDIO - WhatsApp Bot with Calendar/Booking Integration
 OpenAI Tools API with strict mode for reliable function calling
 """
 import os
+import hmac
 import asyncio
 import logging
 import json
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import openai
+import chatwoot_bridge  # WhatsApp -> Chatwoot dashboard bridge
 
 # Google Calendar imports
 from google.oauth2 import service_account
@@ -34,11 +36,14 @@ from apscheduler.triggers.cron import CronTrigger
 
 # Business context (multi-tenant)
 from business_context import (
+    lookup_treatment, lookup_business_policy, lookup_closure_dates,
+    lookup_faq, lookup_operator_for_treatment, get_available_treatments,
     load_business_by_phone_number_id,
     load_services,
     load_business_hours,
     load_closures,
     load_operators,
+    load_faqs,
     resolve_operator,
     extract_phone_number_id,
     build_system_prompt,
@@ -88,8 +93,12 @@ else:
 
 # WhatsApp Configuration - MUST be set via environment variables
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "961636900357709")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "950083738197862")
 WHATSAPP_WEBHOOK_VERIFY_TOKEN = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "lyosaas2024")
+
+# Shared secret authenticating Chatwoot -> bot webhooks (Chatwoot custom webhooks
+# cannot send custom headers, so the secret rides in the URL as ?token=...).
+CHATWOOT_WEBHOOK_SECRET = os.getenv("CHATWOOT_WEBHOOK_SECRET", "")
 
 # Instagram Configuration
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
@@ -169,6 +178,19 @@ def combine_buffered_messages(messages: List[Dict]) -> str:
     logger.info(f"📦 Combined {len(messages)} messages into single input")
     return combined
 
+async def _chatwoot_push(direction: str, phone: str, content: str, name: str = None):
+    """Mirror a WhatsApp message into Chatwoot without blocking the event loop.
+    Failures are swallowed so the customer-facing flow is never affected."""
+    try:
+        loop = asyncio.get_event_loop()
+        if direction == "in":
+            await loop.run_in_executor(None, chatwoot_bridge.push_incoming, phone, content, name)
+        else:
+            await loop.run_in_executor(None, chatwoot_bridge.push_outgoing, phone, content)
+    except Exception as e:
+        logger.warning(f"Chatwoot push ({direction}) failed for {phone}: {e}")
+
+
 async def process_buffered_messages(phone: str):
     """Process all buffered messages for a user after timer expires"""
     try:
@@ -198,6 +220,15 @@ async def process_buffered_messages(phone: str):
         logger.info(f"⏰ Timer fired for {phone}. Processing {len(messages)} buffered message(s)")
         logger.info(f"📝 Combined input: {combined_text[:100]}...")
 
+        # Mirror the customer message into Chatwoot so agents see the conversation
+        await _chatwoot_push("in", phone, combined_text, contact_name)
+
+        # Human takeover: if an agent is handling this chat in Chatwoot, suspend
+        # the AI. The customer message is still mirrored above so the agent sees it.
+        if chatwoot_bridge.has_human_takeover(phone):
+            logger.info(f"🙋 Human takeover active for {phone} — skipping AI reply")
+            return
+
         # Extract business info for multi-tenant
         business = biz_context["business"] if biz_context else {}
         biz_id = business.get("id") if business else None
@@ -211,6 +242,9 @@ async def process_buffered_messages(phone: str):
         # Log response preview
         logger.info(f"📤 Response: {response[:100]}...")
         await send_whatsapp_message(phone, response, business)
+
+        # Mirror the bot's reply into Chatwoot
+        await _chatwoot_push("out", phone, response)
 
     except Exception as e:
         logger.error(f"❌ Error processing buffered messages for {phone}: {e}")
@@ -438,9 +472,14 @@ def _legacy_system_prompt():
    ❌ WRONG: "Taglio Donna - codice: taglio_donna"
    ✅ CORRECT: "Taglio Donna - €60"
 
-⚠️ If customer asks for a service we DON'T offer (perm, extensions, keratin, etc.):
-   → List our available services in the customer's language
-   → Use internal codes ONLY when calling functions, never in messages to customer
+⚠️ CRITICAL - ONLY OFFER SERVICES LISTED ABOVE. NOTHING ELSE EXISTS:
+   DO NOT invent, imagine, or make up ANY service not listed above.
+   If customer asks for a service NOT in the list (e.g., perm, extensions, keratin, thai massage):
+   -> Say "Mi dispiace, non offriamo questo servizio" / "Sorry, we don't offer that"
+   -> Then list ONLY the services shown above
+   -> NEVER say "yes we offer that" for something not in the list
+   -> NEVER invent prices or durations for non-existent services
+   -> Use internal codes ONLY when calling functions, never in messages to customer
 
 🕐 BUSINESS HOURS:
 ══════════════════════════════════════════════════════════════
@@ -553,6 +592,24 @@ BOOKING FLOW:
 
    If you say "confirmed" but didn't call create_appointment, the booking was NOT saved!
    The customer will show up and have NO appointment!
+
+💶 PRICE IN CONFIRMATIONS RULE (IMP-015):
+   When confirming a booking (after create_appointment returns success):
+   → Do NOT mention the price in the confirmation message
+   → Prices are for reference when listing services, not for booking confirmations
+   → Payment happens in-salon — do not quote totals
+
+   ✅ CORRECT: "Perfetto! Taglio Donna con Marco martedì 3 giugno alle 10:00. A presto!"
+   ❌ WRONG:   "Perfetto! Taglio Donna €60 con Marco martedì 3 giugno alle 10:00."
+
+🔕 AUTO-ADDON OPERATOR RULE (IMP-014):
+   When a booking includes an automatic follow-up service (e.g., Piega after Taglio):
+   → Confirm the follow-up service name and time in the booking summary
+   → Do NOT mention which operator will perform the follow-up service
+   → Only tell the customer the addon operator IF they specifically ask "chi farà la piega?" or similar
+
+   ✅ CORRECT: "Prenotato! Taglio con Marco alle 10:00 e Piega alle 10:30."
+   ❌ WRONG:   "Prenotato! Taglio con Marco alle 10:00 e Piega con Giulia alle 10:30."
 
 ⚠️ AFTER BOOKING IS CONFIRMED - DO NOT BOOK AGAIN:
    Once you confirm a booking, if customer replies with acknowledgment words like:
@@ -878,17 +935,48 @@ def get_tomorrow_appointments(business_id: int = None) -> List[Dict]:
 
         tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
 
+        appointments = []
         if business_id is not None:
-            # Multi-tenant: new appointments table
+            # Multi-tenant: exclude auto-addon children (they are covered by parent's reminder)
             cur.execute("""
                 SELECT id, customer_phone, customer_name, treatment_code,
-                       appointment_date, appointment_time, price
+                       appointment_date, appointment_time, price,
+                       treatment_name, operator_name
                 FROM appointments
                 WHERE business_id = %s AND appointment_date = %s
                   AND status = 'confirmed'
                   AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
+                  AND COALESCE(is_auto_addon, FALSE) = FALSE
                 ORDER BY appointment_time
             """, (business_id, tomorrow))
+            for row in cur.fetchall():
+                apt = {
+                    "id": row[0],
+                    "phone": row[1],
+                    "name": row[2],
+                    "service": row[3],
+                    "date": row[4],
+                    "time": row[5],
+                    "price": row[6],
+                    "treatment_name": row[7],
+                    "operator_name": row[8],
+                    "addons": []
+                }
+                # Fetch auto-addon children so we can include them in the reminder
+                cur.execute("""
+                    SELECT id, appointment_time, treatment_name, treatment_code
+                    FROM appointments
+                    WHERE parent_appointment_id = %s AND status = 'confirmed'
+                    ORDER BY appointment_time
+                """, (apt["id"],))
+                for addon_row in cur.fetchall():
+                    apt["addons"].append({
+                        "id": addon_row[0],
+                        "time": addon_row[1],
+                        "treatment_name": addon_row[2],
+                        "treatment_code": addon_row[3],
+                    })
+                appointments.append(apt)
         else:
             # Legacy: old salon_appointments table
             cur.execute("""
@@ -900,18 +988,19 @@ def get_tomorrow_appointments(business_id: int = None) -> List[Dict]:
                   AND (reminder_sent_at IS NULL OR reminder_sent_at < CURRENT_DATE)
                 ORDER BY appointment_time
             """, (tomorrow,))
-
-        appointments = []
-        for row in cur.fetchall():
-            appointments.append({
-                "id": row[0],
-                "phone": row[1],
-                "name": row[2],
-                "service": row[3],
-                "date": row[4],
-                "time": row[5],
-                "price": row[6]
-            })
+            for row in cur.fetchall():
+                appointments.append({
+                    "id": row[0],
+                    "phone": row[1],
+                    "name": row[2],
+                    "service": row[3],
+                    "date": row[4],
+                    "time": row[5],
+                    "price": row[6],
+                    "treatment_name": None,
+                    "operator_name": None,
+                    "addons": []
+                })
 
         cur.close()
         conn.close()
@@ -967,6 +1056,10 @@ def mark_reminder_sent(appointment_id: int, business_id: int = None) -> bool:
         cur = conn.cursor()
         if business_id is not None:
             cur.execute("""UPDATE appointments SET reminder_sent_at = CURRENT_TIMESTAMP WHERE id = %s""",
+                        (appointment_id,))
+            # Cascade to auto-addon children so they don't get a duplicate reminder
+            cur.execute("""UPDATE appointments SET reminder_sent_at = CURRENT_TIMESTAMP
+                           WHERE parent_appointment_id = %s""",
                         (appointment_id,))
         else:
             cur.execute("""UPDATE salon_appointments SET reminder_sent_at = CURRENT_TIMESTAMP WHERE id = %s""",
@@ -1162,8 +1255,17 @@ Grazie!"""
 
         for apt in appointments:
             time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
+            service_label = apt.get("treatment_name") or apt.get("service") or ""
+            service_part = f" per *{service_label}*" if service_label else ""
+            addon_part = ""
+            for addon in apt.get("addons", []):
+                addon_time = addon["time"]
+                addon_time_str = addon_time.strftime("%H:%M") if hasattr(addon_time, 'strftime') else str(addon_time)[:5]
+                addon_name = addon.get("treatment_name") or addon.get("treatment_code") or ""
+                if addon_name:
+                    addon_part += f"\nSeguito da *{addon_name}* alle ore {addon_time_str}."
             reminder_message = f"""Buongiorno!😊
-Ti ricordiamo che domani alle ore {time_str} hai un appuntamento con noi.
+Ti ricordiamo che domani alle ore {time_str} hai un appuntamento{service_part} con noi.{addon_part}
 Ti chiediamo gentilmente di confermare rispondendo a questo messaggio entro le 18:00 di oggi.
 
 In caso di mancata conferma, non possiamo garantire la disponibilità dell'appuntamento.
@@ -1189,8 +1291,9 @@ Grazie!"""
 
 
 async def check_unconfirmed_and_notify():
-    """Check for unconfirmed appointments and email owner (runs at 6 PM)"""
-    logger.info("📧 Starting unconfirmed appointments check...")
+    """Disabled per Bug #16 — unconfirmed appointment emails turned off."""
+    logger.info("📧 check_unconfirmed_and_notify: disabled (Bug #16), skipping.")
+    return
 
     unconfirmed = get_unconfirmed_appointments()
     logger.info(f"📋 Found {len(unconfirmed)} unconfirmed appointments")
@@ -1278,14 +1381,24 @@ def load_conversation_history_from_db(phone: str, limit: int = 5, business_id: i
 
         if business_id is not None:
             # Multi-tenant: new conversations table with JSONB messages
+            # Bug #1 fix: only reuse history if last activity within 4h (else stale = new session)
             cur.execute(
-                """SELECT messages FROM conversations
+                """SELECT messages, updated_at FROM conversations
                    WHERE business_id = %s AND customer_phone = %s""",
                 (business_id, phone),
             )
             row = cur.fetchone()
             conn.close()
             if row and row[0] and isinstance(row[0], list):
+                from datetime import datetime, timezone, timedelta
+                updated_at = row[1]
+                if updated_at is not None:
+                    now = datetime.now(timezone.utc)
+                    if updated_at.tzinfo is None:
+                        updated_at = updated_at.replace(tzinfo=timezone.utc)
+                    if now - updated_at > timedelta(hours=4):
+                        logger.info(f"⏰ Session idle >4h for {phone} — starting fresh")
+                        return []
                 return row[0][-(limit * 2):]  # Last N exchanges (user+assistant)
             return []
         else:
@@ -1314,7 +1427,7 @@ def initialize_database():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
+
         # Create appointments table for salon
         cur.execute("""
             CREATE TABLE IF NOT EXISTS salon_appointments (
@@ -1349,7 +1462,7 @@ def initialize_database():
             cur.execute("ALTER TABLE salon_conversations ADD COLUMN IF NOT EXISTS platform VARCHAR(20) DEFAULT 'whatsapp'")
         except:
             pass
-        
+
         # Create conversation history table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS salon_conversations (
@@ -1361,7 +1474,7 @@ def initialize_database():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         conn.commit()
         conn.close()
         logger.info("✅ Database initialized")
@@ -1506,6 +1619,16 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
             return {"success": False, "error": "CUSTOMER_NAME_REQUIRED"}
         customer_name = customer_name.strip()
 
+        # Reject generic placeholder names
+        generic_names = {"client", "cliente", "utente", "customer", "user", "ospite", "guest"}
+        if customer_name.lower() in generic_names:
+            return {
+                "success": False,
+                "error": "GENERIC_NAME_NOT_ALLOWED",
+                "message_it": "Per favore, chiedi il nome del cliente prima di prenotare.",
+                "message_en": "Please ask the customer's name before booking.",
+            }
+
         # Validate service
         if biz_context:
             services = biz_context["services"]
@@ -1602,6 +1725,31 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                         (business_id, resolved_operator_id, date, time)
                     )
                     count = cur.fetchone()[0]
+                    if count > 0 and operators:
+                        # Preferred operator busy — try auto-assign fallback
+                        eligible_ids = [op["id"] for op in operators]
+                        cur.execute(
+                            """SELECT o.id, o.display_name FROM operators o
+                               LEFT JOIN (
+                                   SELECT operator_id, COUNT(*) cnt FROM appointments
+                                   WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                                   GROUP BY operator_id
+                               ) a ON a.operator_id = o.id
+                               WHERE o.id = ANY(%s)
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM appointments ap
+                                     WHERE ap.business_id = %s AND ap.operator_id = o.id
+                                       AND ap.appointment_date = %s AND ap.appointment_time = %s
+                                       AND ap.status = 'confirmed'
+                                 )
+                               ORDER BY COALESCE(a.cnt, 0), o.sort_order LIMIT 1""",
+                            (business_id, date, eligible_ids, business_id, date, time)
+                        )
+                        fallback_row = cur.fetchone()
+                        if fallback_row:
+                            resolved_operator_id = fallback_row[0]
+                            resolved_operator_name = fallback_row[1]
+                            count = 0  # fallback operator is free
                 else:
                     # No operators configured: legacy global check
                     cur.execute(
@@ -1710,11 +1858,72 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                 "service_en": service.get('name_en', service_type),
                 "date": date,
                 "time": time,
-                "price": service['price'],
                 "calendar_synced": bool(google_event_id)
             }
             if resolved_operator_name:
                 result["operator_name"] = resolved_operator_name
+
+            # --- Auto-addon: book follow-up treatment if configured ---
+            addon = service.get("auto_addon") if service else None
+            if addon and biz_context:
+                try:
+                    main_end = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M") + timedelta(minutes=service["duration"])
+                    addon_time = main_end.strftime("%H:%M")
+                    addon_service = biz_context["services"].get(addon["code"])
+                    if addon_service:
+                        # Find operator enabled for the addon treatment (may differ from main)
+                        addon_op_id = resolved_operator_id
+                        addon_op_name = resolved_operator_name
+                        addon_operators = biz_context.get("operators", [])
+                        logger.info(f"🔍 Addon check: addon_code={addon['code']}, main_op_id={addon_op_id}, operators_count={len(addon_operators)}")
+                        if addon_operators and addon_op_id:
+                            # Check if main operator can do addon
+                            main_op = next((op for op in addon_operators if op["id"] == addon_op_id), None)
+                            if main_op:
+                                logger.info(f"🔍 Main op {main_op['display_name']} treatments: {main_op.get('treatments', [])}, addon_code='{addon['code']}', match={addon['code'] in main_op.get('treatments', [])}")
+                            if main_op and addon["code"] not in main_op.get("treatments", []):
+                                # Main operator can't do addon — find one who can and is free
+                                for op in addon_operators:
+                                    if addon["code"] in op.get("treatments", []):
+                                        addon_op_id = op["id"]
+                                        addon_op_name = op["display_name"]
+                                        break
+                        addon_event_id = create_calendar_event(
+                            customer_name=customer_name, service=addon_service,
+                            date_str=date, time_str=addon_time,
+                            customer_phone=normalized_phone,
+                            business=biz_context.get("business"),
+                            operator_name=addon_op_name,
+                        )
+                        cur2 = conn.cursor()
+                        cur2.execute(
+                            """INSERT INTO appointments
+                               (business_id, operator_id, operator_name, customer_phone, customer_name,
+                                treatment_code, treatment_name,
+                                appointment_date, appointment_time, duration_minutes, price, status,
+                                google_event_id, platform, is_auto_addon, parent_appointment_id)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'confirmed', %s, %s, TRUE, %s)
+                               RETURNING id""",
+                            (business_id, addon_op_id, addon_op_name,
+                             normalized_phone, customer_name, addon["code"],
+                             addon["name_it"], date, addon_time,
+                             addon["duration"], addon["price"], addon_event_id, platform,
+                             appointment_id)
+                        )
+                        addon_appt_id = cur2.fetchone()[0]
+                        conn.commit()
+                        result["auto_addon"] = {
+                            "appointment_id": addon_appt_id,
+                            "service": addon["name_it"],
+                            "time": addon_time,
+                            "duration": addon["duration"],
+                            "price": addon["price"],
+                        }
+                        result["total_duration"] = service["duration"] + addon["duration"]
+                        logger.info(f"✅ Auto-addon #{addon_appt_id} ({addon['name_it']}) at {addon_time}")
+                except Exception as e:
+                    logger.error(f"⚠️ Auto-addon failed (main OK): {e}")
+
             return result
         finally:
             conn.close()
@@ -1733,10 +1942,86 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
         return {"success": False, "error": "BOOKING_ERROR", "details": str(e)}
 
 def check_availability(date: str, time: str, business_id: int = None, biz_context: dict = None,
-                       operator_name: str = None) -> Dict[str, Any]:
-    """Check if a time slot is available. If not, suggest nearest alternatives."""
+                       operator_name: str = None, treatment_code: str = None) -> Dict[str, Any]:
+    """Check if a time slot is available. If not, suggest nearest alternatives.
+
+    Bug #2 fix: when treatment_code provided, also validates appt end time
+    does not exceed salon close_time (factoring auto-addon duration).
+    """
     try:
         operators = biz_context.get("operators", []) if biz_context else []
+
+        # --- Bug #2: closing-time check ---
+        if treatment_code and biz_context:
+            services = biz_context.get("services") or {}
+            hours = biz_context.get("hours") or {}
+            svc = services.get(treatment_code)
+            if svc:
+                total_min = int(svc.get("duration", 0))
+                addon = svc.get("auto_addon")
+                if addon:
+                    total_min += int(addon.get("duration", 0))
+                try:
+                    from datetime import datetime as _dt2, timedelta as _td2
+                    start_dt = _dt2.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+                    end_dt = start_dt + _td2(minutes=total_min)
+                    dow = start_dt.weekday()
+                    day_hours = hours.get(dow) or hours.get(str(dow))
+                    if day_hours and day_hours.get("is_open") is False:
+                        return {
+                            "success": True,
+                            "available": False,
+                            "date": date,
+                            "time": time,
+                            "reason": "salon_closed_day",
+                            "message": f"Il salone e' chiuso quel giorno."
+                        }
+                    if day_hours and day_hours.get("close_time"):
+                        close_str = day_hours["close_time"]
+                        close_dt = _dt2.strptime(f"{date} {close_str}", "%Y-%m-%d %H:%M")
+                        if end_dt > close_dt:
+                            return {
+                                "success": True,
+                                "available": False,
+                                "date": date,
+                                "time": time,
+                                "reason": "exceeds_closing",
+                                "total_duration_minutes": total_min,
+                                "salon_close_time": close_str,
+                                "appointment_end_time": end_dt.strftime("%H:%M"),
+                                "message": (
+                                    f"Il trattamento dura {total_min} min e finirebbe alle "
+                                    f"{end_dt.strftime('%H:%M')}, ma chiudiamo alle {close_str}. "
+                                    f"Serve un orario piu' presto."
+                                )
+                            }
+                    if day_hours and day_hours.get("open_time"):
+                        open_str = day_hours["open_time"]
+                        open_dt = _dt2.strptime(f"{date} {open_str}", "%Y-%m-%d %H:%M")
+                        if start_dt < open_dt:
+                            return {
+                                "success": True,
+                                "available": False,
+                                "date": date,
+                                "time": time,
+                                "reason": "before_opening",
+                                "salon_open_time": open_str,
+                                "message": f"Apriamo alle {open_str}."
+                            }
+                except Exception as _e_close:
+                    logger.warning(f"close-time check failed: {_e_close}")
+        # --- end Bug #2 ---
+
+        # --- Bug #4: compute requested duration for overlap checks ---
+        _req_duration = 60  # safe default
+        if treatment_code and biz_context:
+            _svc = (biz_context.get("services") or {}).get(treatment_code)
+            if _svc:
+                _req_duration = int(_svc.get("duration") or 60)
+                _addon = _svc.get("auto_addon")
+                if _addon:
+                    _req_duration += int(_addon.get("duration") or 0)
+        # --- end Bug #4 setup ---
 
         conn = get_db_connection()
         try:
@@ -1748,29 +2033,95 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
                     if not op_result["success"]:
                         return {"success": False, **op_result}
                     op_id = op_result["operator_id"]
+                    # Bug #4: interval overlap, not exact-time match
                     cur.execute(
                         """SELECT COUNT(*) FROM appointments
                            WHERE business_id = %s AND operator_id = %s
-                                 AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                        (business_id, op_id, date, time)
+                                 AND appointment_date = %s AND status = 'confirmed'
+                                 AND appointment_time < (%s::time + (%s || ' minutes')::interval)
+                                 AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
+                        (business_id, op_id, date, time, _req_duration, time)
                     )
                     count = cur.fetchone()[0]
                     available = count == 0
+                    # Validate time is within operator working hours
+                    if available and op_id is not None:
+                        try:
+                            _dow = datetime.strptime(date, "%Y-%m-%d").weekday()
+                            _op_obj = next((op for op in operators if op["id"] == op_id), None)
+                            if _op_obj:
+                                _op_h = _op_obj.get("hours", {}).get(_dow)
+                                if _op_h:
+                                    if not _op_h.get("is_working"):
+                                        conn.close()
+                                        return {
+                                            "success": True, "available": False,
+                                            "date": date, "time": time,
+                                            "reason": "operator_day_off",
+                                            "message": str(op_result.get("operator_name", "L'operatore")) + " non lavora in questo giorno.",
+                                        }
+                                    elif _op_h.get("start") and _op_h.get("end"):
+                                        if time < _op_h["start"] or time >= _op_h["end"]:
+                                            conn.close()
+                                            return {
+                                                "success": True, "available": False,
+                                                "date": date, "time": time,
+                                                "reason": "outside_operator_hours",
+                                                "operator_start": _op_h["start"],
+                                                "operator_end": _op_h["end"],
+                                                "message": str(op_result.get("operator_name", "L'operatore")) + " lavora dalle " + _op_h["start"] + " alle " + _op_h["end"] + " in questo giorno.",
+                                            }
+                        except Exception as _e_hours:
+                            logger.warning(f"operator hours check failed: {_e_hours}")
                 elif operators and not operator_name:
                     # No preference + operators exist: available if not ALL operators booked
+                    # Bug #4: count operators with overlapping appts
                     cur.execute(
                         """SELECT COUNT(DISTINCT operator_id) FROM appointments
-                           WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                        (business_id, date, time)
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                                 AND appointment_time < (%s::time + (%s || ' minutes')::interval)
+                                 AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
+                        (business_id, date, time, _req_duration, time)
                     )
                     booked_count = cur.fetchone()[0]
                     available = booked_count < len(operators)
+                    _no_pref_operator = None
+                    if available:
+                        # Fix: filter to treatment-eligible operators so assigned_operator
+                        # can actually perform the requested service (was returning Greta
+                        # for taglio_uomo because sort_order picks any free operator).
+                        _eligible_ids = [
+                            op["id"] for op in operators
+                            if not treatment_code
+                            or not op.get("treatments")
+                            or treatment_code in op.get("treatments", [])
+                        ] if treatment_code else [op["id"] for op in operators]
+                        _op_ids = _eligible_ids if _eligible_ids else [op["id"] for op in operators]
+                        # Bug #4: NOT EXISTS interval overlap
+                        cur.execute(
+                            """SELECT o.id, o.display_name FROM operators o
+                               WHERE o.id = ANY(%s)
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM appointments ap
+                                     WHERE ap.business_id = %s AND ap.operator_id = o.id
+                                       AND ap.appointment_date = %s AND ap.status = 'confirmed'
+                                       AND ap.appointment_time < (%s::time + (%s || ' minutes')::interval)
+                                       AND (ap.appointment_time + (COALESCE(ap.duration_minutes, 60) || ' minutes')::interval) > %s::time
+                                 )
+                               ORDER BY o.sort_order LIMIT 1""",
+                            (_op_ids, business_id, date, time, _req_duration, time)
+                        )
+                        _free_op = cur.fetchone()
+                        if _free_op:
+                            _no_pref_operator = _free_op[1]
                 else:
-                    # No operators configured: legacy global check
+                    # No operators configured: legacy global check (Bug #4: interval overlap)
                     cur.execute(
                         """SELECT COUNT(*) FROM appointments
-                           WHERE business_id = %s AND appointment_date = %s AND appointment_time = %s AND status = 'confirmed'""",
-                        (business_id, date, time)
+                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                                 AND appointment_time < (%s::time + (%s || ' minutes')::interval)
+                                 AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
+                        (business_id, date, time, _req_duration, time)
                     )
                     count = cur.fetchone()[0]
                     available = count == 0
@@ -1789,6 +2140,9 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
                 "date": date,
                 "time": time
             }
+            # Include free operator name so AI doesn't hallucinate one
+            if locals().get("_no_pref_operator"):
+                result["assigned_operator"] = _no_pref_operator
 
             # If not available, suggest nearest alternatives (BUG-001/BUG-002 enhancement)
             if not available:
@@ -1852,11 +2206,13 @@ def get_customer_appointments(customer_phone: str, business_id: int = None, biz_
             cur = conn.cursor()
             # Only get future appointments (today with future time, or future dates)
             if business_id is not None:
+                # Bug #7: hide auto-addon entries — they roll up under their parent
                 cur.execute(
                     """SELECT id, customer_name, treatment_code, appointment_date, appointment_time,
                               price, status, google_event_id
                        FROM appointments
                        WHERE business_id = %s AND customer_phone = %s AND status = 'confirmed'
+                       AND COALESCE(is_auto_addon, FALSE) = FALSE
                        AND (appointment_date > %s OR (appointment_date = %s AND appointment_time > %s))
                        ORDER BY appointment_date, appointment_time""",
                     (business_id, normalized_phone, today, today, current_time)
@@ -1877,18 +2233,29 @@ def get_customer_appointments(customer_phone: str, business_id: int = None, biz_
             for idx, row in enumerate(cur.fetchall(), 1):
                 service = services.get(row[2], {})
                 time_24h = str(row[4])[:5]  # HH:MM format for function calls
-                appointments.append({
-                    "customer_name": row[1],  # Use this for cancel/modify
+                # Bug #7: surface addon info if parent has one (so AI says "Taglio Donna include Piega")
+                addon_info = None
+                _addon_obj = service.get("auto_addon") if isinstance(service, dict) else None
+                if _addon_obj:
+                    addon_info = {
+                        "name_it": _addon_obj.get("name_it"),
+                        "duration": _addon_obj.get("duration"),
+                    }
+                _appt = {
+                    "customer_name": row[1],
                     "service_code": row[2],
                     "service_en": service.get("name_en", row[2]),
                     "service_it": service.get("name_it", row[2]),
-                    "date": str(row[3]),  # Use this for cancel/modify (YYYY-MM-DD)
-                    "time": format_time_12h(row[4]),  # Display format for customer
-                    "time_24h": time_24h,  # Use this for cancel/modify function calls
+                    "date": str(row[3]),
+                    "time": format_time_12h(row[4]),
+                    "time_24h": time_24h,
                     "price": float(row[5]) if row[5] else 0,
                     "status": row[6],
-                    "google_event_id": row[7]  # Calendar event ID
-                })
+                    "google_event_id": row[7]
+                }
+                if addon_info:
+                    _appt["includes_addon"] = addon_info
+                appointments.append(_appt)
 
             if not appointments:
                 return {
@@ -1926,16 +2293,16 @@ def cancel_appointment(customer_phone: str, customer_name: str, date: str, time:
         try:
             cur = conn.cursor()
 
-            # Find appointment by name + date + time (fuzzy match on name)
+            # Find appointment by phone + date + time (phone is authoritative; name can change)
             if business_id is not None:
                 cur.execute(
                     """SELECT id, google_event_id, customer_name, appointment_date, appointment_time
                        FROM appointments
                        WHERE business_id = %s AND customer_phone = %s
-                       AND LOWER(customer_name) LIKE %s
                        AND appointment_date = %s AND appointment_time = %s
-                       AND status = 'confirmed'""",
-                    (business_id, normalized_phone, f"%{customer_name.lower()}%", date, normalized_time)
+                       AND status = 'confirmed'
+                       AND COALESCE(is_auto_addon, FALSE) = FALSE""",
+                    (business_id, normalized_phone, date, normalized_time)
                 )
             else:
                 cur.execute(
@@ -1973,9 +2340,29 @@ def cancel_appointment(customer_phone: str, customer_name: str, date: str, time:
                 business = biz_context["business"] if biz_context else None
                 delete_calendar_event(google_event_id, business=business)
 
-            # Cancel appointment
+            # Cancel appointment + poison-pill reminder_sent_at to stop future reminders
             if business_id is not None:
-                cur.execute("UPDATE appointments SET status = 'cancelled' WHERE id = %s", (appointment_id,))
+                cur.execute(
+                    """UPDATE appointments SET status = 'cancelled', reminder_sent_at = NOW()
+                       WHERE id = %s""",
+                    (appointment_id,)
+                )
+                # Cancel any auto-addon child appointments
+                cur.execute(
+                    """UPDATE appointments SET status = 'cancelled', reminder_sent_at = NOW()
+                       WHERE parent_appointment_id = %s AND status = 'confirmed'
+                       RETURNING id, google_event_id""",
+                    (appointment_id,)
+                )
+                addon_rows = cur.fetchall()
+                for addon_row in addon_rows:
+                    if addon_row[1]:
+                        try:
+                            delete_calendar_event(addon_row[1], business=biz_context.get("business") if biz_context else None)
+                        except Exception as _e_cal:
+                            logger.warning(f"Failed deleting addon calendar event: {_e_cal}")
+                if addon_rows:
+                    logger.info(f"✅ Cascaded cancel to {len(addon_rows)} auto-addon(s)")
             else:
                 cur.execute("UPDATE salon_appointments SET status = 'cancelled' WHERE id = %s", (appointment_id,))
             conn.commit()
@@ -2413,7 +2800,7 @@ BOOKING_TOOLS = [
         "type": "function",
         "function": {
             "name": "check_availability",
-            "description": "Check if a specific date and time slot is available for booking.",
+            "description": "Check if a specific date and time slot is available for booking. ALWAYS pass treatment_code so the system can validate the appointment fits within salon hours (factoring duration + auto-addon).",
             "strict": True,
             "parameters": {
                 "type": "object",
@@ -2425,9 +2812,17 @@ BOOKING_TOOLS = [
                     "time": {
                         "type": "string",
                         "description": "Time in HH:MM 24h format"
+                    },
+                    "treatment_code": {
+                        "type": ["string", "null"],
+                        "description": "Treatment code (e.g. 'taglio_donna'). REQUIRED to validate the appointment does not exceed closing time."
+                    },
+                    "operator_name": {
+                        "type": ["string", "null"],
+                        "description": "Optional preferred operator name."
                     }
                 },
-                "required": ["date", "time"],
+                "required": ["date", "time", "treatment_code", "operator_name"],
                 "additionalProperties": False
             }
         }
@@ -2619,7 +3014,8 @@ def execute_function(function_name: str, arguments: str, phone: str,
                 time=args["time"],
                 business_id=business_id,
                 biz_context=biz_context,
-                operator_name=args.get("operator_name")
+                operator_name=args.get("operator_name"),
+                treatment_code=args.get("treatment_code") or args.get("service_type")
             )
 
         elif function_name == "get_customer_appointments":
@@ -2659,9 +3055,33 @@ def execute_function(function_name: str, arguments: str, phone: str,
         elif function_name == "escalate_to_human":
             return escalate_to_human(phone=phone, reason=args["reason"], biz_context=biz_context)
 
+        elif function_name == "lookup_treatment":
+            bid = business_id or 1
+            return lookup_treatment(bid, args["treatment_name"])
+
+        elif function_name == "lookup_business_policy":
+            bid = business_id or 1
+            return lookup_business_policy(bid, args["policy_type"])
+
+        elif function_name == "lookup_closure_dates":
+            bid = business_id or 1
+            return lookup_closure_dates(bid, month=args.get("month"))
+
+        elif function_name == "lookup_faq":
+            bid = business_id or 1
+            return lookup_faq(bid, args["question"])
+
+        elif function_name == "lookup_operator_for_treatment":
+            bid = business_id or 1
+            return lookup_operator_for_treatment(bid, args["treatment_code"])
+
+        elif function_name == "get_available_treatments":
+            bid = business_id or 1
+            return get_available_treatments(bid)
+
         else:
             return {"success": False, "error": "UNKNOWN_FUNCTION", "function_name": function_name}
-    
+
     except Exception as e:
         logger.error(f"Function execution error: {e}")
         return {"success": False, "error": str(e)}
@@ -2671,6 +3091,9 @@ def execute_function(function_name: str, arguments: str, phone: str,
 # ============================================================================
 
 conversation_history: Dict[str, List[Dict]] = {}
+# Bug #1 fix: track last activity per phone to expire stale in-memory sessions
+last_activity: Dict[str, "datetime"] = {}
+SESSION_IDLE_HOURS = 1  # Reset conversation context after 1h idle
 
 def get_ai_response(phone: str, message: str, platform: str = "whatsapp", business_id: int = None, biz_context: dict = None) -> str:
     """
@@ -2683,6 +3106,16 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
     - Temperature=0 for deterministic behavior
     """
     try:
+        # Clear stale in-memory session if idle > SESSION_IDLE_HOURS
+        from datetime import datetime as _dt, timedelta as _td
+        _now = _dt.now()
+        _was_idle_reset = False
+        if phone in last_activity and (_now - last_activity[phone]) > _td(hours=SESSION_IDLE_HOURS):
+            logger.info(f"⏰ In-memory session idle >{SESSION_IDLE_HOURS}h for {phone} — clearing")
+            conversation_history.pop(phone, None)
+            _was_idle_reset = True
+        last_activity[phone] = _now
+
         # Get or create conversation history
         if phone not in conversation_history:
             conversation_history[phone] = load_conversation_history_from_db(phone, business_id=business_id)
@@ -2690,10 +3123,48 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
         # AI-native language detection: Let GPT-4o detect and maintain language from conversation context
         logger.info(f"🌐 AI-native language detection for message: '{message[:50]}...'")
 
+        # Normalize to lowercase so all-caps input doesn't bypass date/closure parsing (P3 fix)
+        normalized_message = message.lower()
+
+        # Bug #5: lookup known customer name to avoid asking again for repeat clients
+        _known_name = None
+        try:
+            _conn_lookup = get_db_connection()
+            _cur_lookup = _conn_lookup.cursor()
+            if business_id is not None:
+                _cur_lookup.execute(
+                    """SELECT customer_name FROM appointments
+                       WHERE business_id = %s AND customer_phone = %s
+                         AND customer_name IS NOT NULL AND customer_name <> ''
+                         AND customer_name NOT IN ('Cliente','Utente')
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (business_id, phone)
+                )
+                _r = _cur_lookup.fetchone()
+                if _r:
+                    _known_name = _r[0]
+            _conn_lookup.close()
+        except Exception as _e_lookup:
+            logger.warning(f"known-name lookup failed: {_e_lookup}")
+
+        _system_prompt = get_system_prompt(biz_context)
+        if _known_name:
+            _system_prompt = (
+                f"[KNOWN CUSTOMER NAME: {_known_name}]\n"
+                f"This customer has booked with us before. Use this exact name for any new booking. "
+                f"DO NOT ask for the name again — the customer is already known.\n\n"
+                + _system_prompt
+            )
+        if _was_idle_reset:
+            _system_prompt = (
+                f"[NEW SESSION: previous conversation cleared after idle timeout]\n"
+                f"Start with a warm greeting like 'Ciao! Come posso aiutarti?' before responding to their message.\n\n"
+                + _system_prompt
+            )
         # Build messages - GPT-4o will detect language from conversation history
-        messages = [{"role": "system", "content": get_system_prompt(biz_context)}]
+        messages = [{"role": "system", "content": _system_prompt}]
         messages.extend(conversation_history[phone][-10:])  # Last 10 messages for context
-        messages.append({"role": "user", "content": message})
+        messages.append({"role": "user", "content": normalized_message})
 
         # Use dynamic tools when biz_context is available, else legacy fallback
         tools = build_booking_tools(biz_context["services"], operators=biz_context.get("operators", [])) if biz_context else BOOKING_TOOLS
@@ -2712,10 +3183,12 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
             has_function_call = bool(assistant_message.tool_calls)
         else:
             # Old SDK v0.x syntax
+            # Convert dynamic tools to old SDK format
+            dynamic_functions = convert_tools_to_functions(tools)
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=messages,
-                functions=BOOKING_FUNCTIONS,
+                functions=dynamic_functions,
                 function_call="auto",
                 temperature=0
             )
@@ -2794,7 +3267,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
                 second_response = openai.ChatCompletion.create(
                     model="gpt-4o",
                     messages=messages,
-                    functions=BOOKING_FUNCTIONS,
+                    functions=dynamic_functions,
                     function_call="auto",
                     temperature=0
                 )
@@ -2867,7 +3340,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
                     third_response = openai.ChatCompletion.create(
                         model="gpt-4o",
                         messages=messages,
-                        functions=BOOKING_FUNCTIONS,
+                        functions=dynamic_functions,
                         function_call="auto",
                         temperature=0
                     )
@@ -2950,7 +3423,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
                     final_message = second_message.get("content", '') or ''
 
             # Save to history
-            conversation_history[phone].append({"role": "user", "content": message})
+            conversation_history[phone].append({"role": "user", "content": normalized_message})
             conversation_history[phone].append({"role": "assistant", "content": final_message})
 
             return final_message
@@ -2963,7 +3436,7 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
                 response_text = assistant_message.get("content", '') or ''
 
             # Save to history
-            conversation_history[phone].append({"role": "user", "content": message})
+            conversation_history[phone].append({"role": "user", "content": normalized_message})
             conversation_history[phone].append({"role": "assistant", "content": response_text})
 
             return response_text
@@ -3005,7 +3478,7 @@ async def send_whatsapp_message(phone: str, message: str, business: dict = None)
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -3013,7 +3486,7 @@ async def send_whatsapp_message(phone: str, message: str, business: dict = None)
         "type": "text",
         "text": {"body": message}
     }
-    
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload, timeout=30)
@@ -3038,13 +3511,13 @@ async def mark_as_read(message_id: str, business: dict = None) -> bool:
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
         "messaging_product": "whatsapp",
         "status": "read",
         "message_id": message_id
     }
-    
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload, timeout=10)
@@ -3386,6 +3859,8 @@ async def startup():
     """Initialize on startup"""
     initialize_database()
     setup_reminder_scheduler()
+    # Durable human-takeover store (survives restarts). Falls back to in-memory.
+    chatwoot_bridge.init_takeover_store(get_db_connection)
     logger.info(f"🚀 {BUSINESS_NAME} WhatsApp + Instagram Bot started!")
 
 @app.get("/webhook")
@@ -3394,22 +3869,71 @@ async def verify_webhook(request: Request):
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
-    
+
     if mode == "subscribe" and token == WHATSAPP_WEBHOOK_VERIFY_TOKEN:
         logger.info("✅ Webhook verified!")
         return PlainTextResponse(challenge)
-    
+
     return PlainTextResponse("Failed", status_code=403)
+
+@app.post("/webhook/chatwoot")
+async def chatwoot_webhook(request: Request):
+    """Inbound Chatwoot events: deliver human-agent replies to the customer over
+    WhatsApp and toggle the AI-suspend (human takeover) flag.
+
+    Auth: Chatwoot custom webhooks cannot add headers, so the shared secret is
+    passed as ?token=... in the configured webhook URL.
+    """
+    # --- authenticate (fail closed) ---
+    if not CHATWOOT_WEBHOOK_SECRET:
+        logger.error("CHATWOOT_WEBHOOK_SECRET not configured — rejecting webhook")
+        return JSONResponse({"status": "not_configured"}, status_code=503)
+    token = request.query_params.get("token", "")
+    if not hmac.compare_digest(token, CHATWOOT_WEBHOOK_SECRET):
+        return JSONResponse({"status": "forbidden"}, status_code=403)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"status": "bad_request"}, status_code=400)
+
+    decision = chatwoot_bridge.classify_webhook_event(payload)
+    action = decision.get("action")
+
+    if action == "forward":
+        phone = decision["phone"]
+        content = decision["content"]
+        chatwoot_bridge.mark_human_takeover(phone)
+        await send_whatsapp_message(phone, content)
+        logger.info(f"➡️ Forwarded agent reply to {phone} (takeover ON)")
+        return JSONResponse({"status": "forwarded"})
+
+    if action == "set_takeover":
+        phone = decision.get("phone")
+        if phone:
+            chatwoot_bridge.mark_human_takeover(phone)
+            logger.info(f"🏷️ bot_paused label detected — takeover ON for {phone}")
+        return JSONResponse({"status": "takeover_set"})
+
+    if action == "clear_takeover":
+        phone = decision.get("phone")
+        if phone:
+            chatwoot_bridge.clear_human_takeover(phone)
+            logger.info(f"✅ Conversation resolved — takeover OFF for {phone}")
+        return JSONResponse({"status": "takeover_cleared"})
+
+    return JSONResponse({"status": "ignored", "reason": decision.get("reason")})
+
 
 @app.post("/webhook")
 async def webhook(request: Request):
     """Handle incoming WhatsApp messages"""
     try:
         body = await request.json()
-        
+
         if body.get("object") != "whatsapp_business_account":
             return JSONResponse({"status": "ignored"})
-        
+
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
@@ -3435,12 +3959,15 @@ async def webhook(request: Request):
                 business_closures = load_closures(business["id"])
                 business_operators = load_operators(business["id"])
 
+                business_faqs = load_faqs(business["id"])
+
                 biz_context = {
                     "business": business,
                     "services": business_services,
                     "hours": business_hours,
                     "closures": business_closures,
                     "operators": business_operators,
+                    "faqs": business_faqs,
                 }
                 # --- END ROUTING ---
 
@@ -3448,7 +3975,7 @@ async def webhook(request: Request):
                     await process_message(message, value, biz_context)
 
         return JSONResponse({"status": "processed"})
-    
+
     except Exception as e:
         logger.error(f"❌ Webhook error: {e}")
         return JSONResponse({"status": "error"})
@@ -3518,6 +4045,23 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
             logger.info(f"🔒 Chat blocked for {phone}, ignoring message")
             return  # Don't respond to blocked chats
 
+        # Human takeover: an agent is handling this chat in Chatwoot -> suspend the
+        # AI for every reply path below. Still mirror the customer's message so the
+        # agent sees it in the dashboard.
+        if chatwoot_bridge.has_human_takeover(phone):
+            if message_type == "text":
+                mirror_text = message.get("text", {}).get("body", "")
+            elif message_type == "interactive":
+                interactive = message.get("interactive", {})
+                mirror_text = (interactive.get("button_reply", {}).get("title", "")
+                               or interactive.get("list_reply", {}).get("title", ""))
+            else:
+                mirror_text = f"[{message_type} message]"
+            if mirror_text:
+                await _chatwoot_push("in", phone, mirror_text, contact_name)
+            logger.info(f"🙋 Human takeover active for {phone} — AI suspended")
+            return
+
         if message_type == "text":
             text = message.get("text", {}).get("body", "")
             if text:
@@ -3544,7 +4088,7 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                 save_conversation_to_db(phone, contact_name, text, response, business_id=biz_id)
 
                 await send_whatsapp_message(phone, response, business)
-        
+
         else:
             # Non-text message (voice, sticker, image, etc.)
             logger.info(f"🎤 Non-text message type: {message_type} from {phone}")
@@ -3612,9 +4156,15 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
                 logger.info(f"❓ Unknown message type: {message_type} from {phone}")
                 response_msg = "Posso rispondere solo a messaggi di testo. Come posso aiutarti? 💇‍♀️"
                 await send_whatsapp_message(phone, response_msg, business)
-    
+
     except Exception as e:
         logger.error(f"Process message error: {e}")
+
+@app.post("/reload-config")
+async def reload_config():
+    """Force reload business config — called after dashboard changes."""
+    return JSONResponse({"status": "reloaded", "note": "Multi-tenant bot reloads config per-request from DB"})
+
 
 @app.get("/health")
 async def health_check():
@@ -3860,7 +4410,7 @@ async def clear_all_buffers():
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     logger.info("=" * 60)
     logger.info(f"🚀 STARTING {BUSINESS_NAME.upper()} WITH BOOKING")
     logger.info("=" * 60)
@@ -3869,11 +4419,11 @@ if __name__ == "__main__":
     logger.info(f"📅 Booking: ENABLED")
     logger.info(f"🤖 AI: Function Calling ENABLED")
     logger.info("=" * 60)
-    
+
     uvicorn.run(
         "salon_bot_with_booking:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=False,
         log_level="info"
     )
@@ -3887,7 +4437,7 @@ async def simulate_reminder(phone: str):
 Ti ricordiamo che domani alle ore 10:00 hai un appuntamento con noi.
 Ti chiediamo gentilmente di confermare rispondendo a questo messaggio.
 Grazie!'''
-    
+
     save_conversation_to_db(
         phone=phone,
         name='TestUser',
