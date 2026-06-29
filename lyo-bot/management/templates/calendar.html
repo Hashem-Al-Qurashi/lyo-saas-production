@@ -300,10 +300,8 @@
         },
         events: {url: '/manage/api/appointments', method: 'GET'},
 
-        // Hide "Non assegnato" column when no events use it.
-        // filterResourcesWithEvents lets FullCalendar do this natively without
-        // touching its internal DOM (direct DOM manipulation caused render loops).
-        filterResourcesWithEvents: true,
+        // "Non assegnato" is now conditionally returned by /api/operators only when
+        // unassigned appointments exist on that date — no DOM hacks, no render loops.
 
         eventDrop: function(info) {
             var evt = info.event;
