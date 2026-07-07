@@ -28,6 +28,29 @@ class Business(BaseModel):
     operators: List[Operator] = Field(default_factory=list)
     treatments: List[Treatment] = Field(default_factory=list)
     hours: List[BusinessHours] = Field(default_factory=list)
+    closures: List[BusinessClosure] = Field(default_factory=list)
+
+
+class OperatorHours(BaseModel):
+    operator_id: int
+    day_of_week: int  # 0=Monday, 6=Sunday
+    is_working: bool = True
+    start_time: Optional[time] = None  # None = use business default
+    end_time: Optional[time] = None    # None = use business default
+    break_start: Optional[time] = None  # None = no break
+    break_end: Optional[time] = None    # None = no break
+
+
+class BusinessClosure(BaseModel):
+    business_id: int
+    closure_date: date
+    closure_end_date: Optional[date] = None
+    reason: Optional[str] = None
+
+    def covers(self, d: date) -> bool:
+        """True if this closure covers date *d*."""
+        end = self.closure_end_date or self.closure_date
+        return self.closure_date <= d <= end
 
 
 class Operator(BaseModel):
@@ -39,6 +62,8 @@ class Operator(BaseModel):
     sort_order: int = 0
     notes: Optional[str] = None
     treatment_ids: List[int] = Field(default_factory=list)
+    # Loaded relations
+    hours: List[OperatorHours] = Field(default_factory=list)
 
 
 class Treatment(BaseModel):
@@ -55,6 +80,7 @@ class Treatment(BaseModel):
     sort_order: int = 0
     notes: Optional[str] = None
     operator_ids: List[int] = Field(default_factory=list)
+    auto_addon_id: Optional[int] = None
 
 
 class OperatorTreatment(BaseModel):
@@ -119,6 +145,7 @@ class WebhookConversation(BaseModel):
     inbox_id: Optional[int] = None
     status: Optional[str] = None
     meta: Optional[dict] = None
+    labels: list[str] = []
 
 
 class WebhookInbox(BaseModel):

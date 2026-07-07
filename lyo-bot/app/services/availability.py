@@ -3,7 +3,7 @@ from datetime import date, time, timedelta, datetime
 from typing import Optional
 
 from app.models.database import get_connection
-from app.models.schemas import Business, Operator, Treatment, BusinessHours
+from app.models.schemas import Business, Operator, OperatorHours, Treatment, BusinessHours
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +40,21 @@ class AvailabilityService:
         appt_date: date,
         appt_time: time,
         duration_minutes: int,
+        operator: Optional[Operator] = None,
     ) -> bool:
         """True when *operator_id* has no confirmed appointment overlapping
-        the window [appt_time, appt_time + duration_minutes)."""
+        the window [appt_time, appt_time + duration_minutes) AND the window
+        does not overlap the operator's break time."""
+        # Check break time overlap
+        if operator:
+            dow = appt_date.weekday()
+            for h in operator.hours:
+                if h.day_of_week == dow and h.break_start and h.break_end:
+                    appt_end = (datetime.combine(appt_date, appt_time)
+                                + timedelta(minutes=duration_minutes)).time()
+                    if appt_time < h.break_end and appt_end > h.break_start:
+                        return False
+
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -105,13 +117,16 @@ class AvailabilityService:
             if not operator:
                 return {"available": False, "reason": "OPERATOR_NOT_FOUND"}
 
+            if not self._operator_works_on_day(operator, appt_date.weekday()):
+                return {"available": False, "reason": "OPERATOR_NOT_WORKING_TODAY"}
+
             if operator.id not in treatment.operator_ids:
                 return {
                     "available": False,
                     "reason": "OPERATOR_DOES_NOT_OFFER_TREATMENT",
                 }
 
-            if self.is_operator_free(business.id, operator.id, appt_date, appt_time, duration):
+            if self.is_operator_free(business.id, operator.id, appt_date, appt_time, duration, operator=operator):
                 return {
                     "available": True,
                     "operator": operator.display_name,
@@ -124,7 +139,7 @@ class AvailabilityService:
 
             # Preferred operator busy => alternatives for THIS operator only
             alternatives = self._find_operator_alternatives(
-                business, operator.id, treatment, appt_date
+                business, operator.id, treatment, appt_date, operator=operator
             )
             return {
                 "available": False,
@@ -133,13 +148,17 @@ class AvailabilityService:
                 "alternatives": alternatives,
             }
 
-        # 3. Auto-assign: first free operator
+        # 3. Auto-assign: first free operator working on this day
         eligible_operators = self.get_operators_for_treatment(business, treatment_code)
         if not eligible_operators:
             return {"available": False, "reason": "NO_OPERATORS_FOR_TREATMENT"}
+        day_of_week = appt_date.weekday()
+        eligible_operators = [op for op in eligible_operators if self._operator_works_on_day(op, day_of_week)]
+        if not eligible_operators:
+            return {"available": False, "reason": "NO_OPERATORS_WORKING_TODAY"}
 
         for op in eligible_operators:
-            if self.is_operator_free(business.id, op.id, appt_date, appt_time, duration):
+            if self.is_operator_free(business.id, op.id, appt_date, appt_time, duration, operator=op):
                 return {
                     "available": True,
                     "operator": op.display_name,
@@ -184,19 +203,26 @@ class AvailabilityService:
             hours.open_time, hours.close_time, treatment.duration_minutes
         )
 
+        day_of_week = appt_date.weekday()
         if preferred_operator:
             operator = self._find_operator_by_name(business, preferred_operator)
             if not operator or operator.id not in treatment.operator_ids:
                 return []
+            if not self._operator_works_on_day(operator, day_of_week):
+                return []
             operators_to_check = [operator]
         else:
-            operators_to_check = self.get_operators_for_treatment(business, treatment_code)
+            operators_to_check = [
+                op for op in self.get_operators_for_treatment(business, treatment_code)
+                if self._operator_works_on_day(op, day_of_week)
+            ]
 
         available: list[dict] = []
         for slot_time in slots:
             for op in operators_to_check:
                 if self.is_operator_free(
-                    business.id, op.id, appt_date, slot_time, treatment.duration_minutes
+                    business.id, op.id, appt_date, slot_time, treatment.duration_minutes,
+                    operator=op,
                 ):
                     available.append(
                         {
@@ -253,8 +279,11 @@ class AvailabilityService:
             with get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT 1 FROM business_closures WHERE business_id = %s AND closure_date = %s",
-                        (business_id, appt_date),
+                        """SELECT 1 FROM business_closures
+                           WHERE business_id = %s
+                             AND closure_date <= %s
+                             AND COALESCE(closure_end_date, closure_date) >= %s""",
+                        (business_id, appt_date, appt_date),
                     )
                     return cur.fetchone() is not None
         except Exception:
@@ -302,12 +331,27 @@ class AvailabilityService:
                 return op
         return None
 
+    @staticmethod
+    def _operator_works_on_day(operator: Operator, day_of_week: int) -> bool:
+        """Return True if *operator* is scheduled to work on *day_of_week*.
+
+        If no operator_hours rows exist (legacy / unconfigured), defaults to True
+        so existing behaviour is unchanged.
+        """
+        if not operator.hours:
+            return True  # no schedule configured → assume available
+        for h in operator.hours:
+            if h.day_of_week == day_of_week:
+                return h.is_working
+        return True  # day not in schedule → assume available
+
     def _find_operator_alternatives(
         self,
         business: Business,
         operator_id: int,
         treatment: Treatment,
         appt_date: date,
+        operator: Optional[Operator] = None,
     ) -> list[dict]:
         """Alternative time slots for a *specific* operator on *appt_date*."""
         hours = self._get_hours_for_date(business, appt_date)
@@ -319,7 +363,8 @@ class AvailabilityService:
         alts: list[dict] = []
         for slot_time in slots:
             if self.is_operator_free(
-                business.id, operator_id, appt_date, slot_time, treatment.duration_minutes
+                business.id, operator_id, appt_date, slot_time, treatment.duration_minutes,
+                operator=operator,
             ):
                 alts.append({"time": slot_time.strftime("%H:%M")})
         return alts
@@ -345,7 +390,8 @@ class AvailabilityService:
                 continue  # skip the time they already asked for
             for op in eligible:
                 if self.is_operator_free(
-                    business.id, op.id, appt_date, slot_time, treatment.duration_minutes
+                    business.id, op.id, appt_date, slot_time, treatment.duration_minutes,
+                    operator=op,
                 ):
                     alts.append(
                         {

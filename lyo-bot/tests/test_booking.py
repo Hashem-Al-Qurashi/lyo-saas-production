@@ -155,3 +155,71 @@ class TestCreateAppointment:
 
         assert result["success"] is False
         assert result["error"] == "CUSTOMER_NAME_REQUIRED"
+
+    @patch("app.services.booking.cal_module.create_calendar_event", return_value="evt_abc")
+    @patch("app.services.booking.get_connection")
+    @patch("app.services.booking.availability_service")
+    def test_create_falls_back_to_auto_assign_when_preferred_operator_busy(
+        self, mock_avail, mock_get_conn, mock_cal
+    ):
+        """Greta bug: check_availability(null) → Sara free → AI echoes Sara →
+        create_appointment("Sara") → Sara now busy (TOCTOU race) → must fall back
+        to auto-assign and book Federica instead of failing the booking.
+
+        Without the fix this test is RED (returns PREFERRED_OPERATOR_BUSY).
+        With the fix it is GREEN (falls back to Federica).
+        """
+        biz = Business(
+            id=1, chatwoot_account_id=100, name="Test Salon",
+            operators=[
+                Operator(id=1, business_id=1, technical_id="op1",
+                         display_name="Sara", treatment_ids=[1]),
+                Operator(id=2, business_id=1, technical_id="op2",
+                         display_name="Federica", treatment_ids=[1]),
+            ],
+            treatments=[
+                Treatment(id=1, business_id=1, code="henne",
+                          name_it="Henné", duration_minutes=60, price=50,
+                          operator_ids=[1, 2]),
+            ],
+            hours=[
+                BusinessHours(business_id=1, day_of_week=i, is_open=True,
+                              open_time=time(9, 0), close_time=time(20, 0))
+                for i in range(5)
+            ],
+        )
+
+        # First call (preferred_operator="Sara"): Sara busy
+        preferred_busy = {
+            "available": False,
+            "reason": "PREFERRED_OPERATOR_BUSY",
+            "operator": "Sara",
+            "alternatives": [{"time": "15:00"}, {"time": "16:00"}],
+        }
+        # Second call (preferred_operator=None, auto-assign): Federica free
+        auto_assign_ok = {
+            "available": True,
+            "operator": "Federica",
+            "operator_id": 2,
+            "treatment": "Henné",
+            "treatment_code": "henne",
+            "duration_minutes": 60,
+            "price": "50",
+        }
+        mock_avail.check_slot.side_effect = [preferred_busy, auto_assign_ok]
+        mock_get_conn.side_effect = _mock_conn_insert(202)
+
+        svc = BookingService()
+        result = svc.create_appointment(
+            business=biz,
+            customer_phone="+393331234567",
+            customer_name="Greta Biondin",
+            treatment_code="henne",
+            appt_date=WEDNESDAY,
+            appt_time=time(17, 0),
+            preferred_operator="Sara",  # AI echoed this from check_availability result
+        )
+
+        assert result["success"] is True, f"Expected success but got: {result}"
+        assert result["operator"] == "Federica"
+        assert result["appointment_id"] == 202

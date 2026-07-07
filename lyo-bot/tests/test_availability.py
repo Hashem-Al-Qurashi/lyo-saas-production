@@ -4,7 +4,7 @@ This is the most important test file: it covers multi-operator logic,
 preferred-operator behaviour, parallel booking, and business-hours checks.
 """
 
-from datetime import date, time
+from datetime import date, time, timedelta
 from unittest.mock import patch, MagicMock
 from contextlib import contextmanager
 
@@ -87,10 +87,18 @@ def _mock_conn_count(count_value):
     return _ctx
 
 
-# A Wednesday in the future (day_of_week=2, which is open)
-WEDNESDAY = date(2026, 3, 4)
-# A Saturday (day_of_week=5, which is closed)
-SATURDAY = date(2026, 3, 7)
+def _next_weekday(weekday: int) -> date:
+    """Return the next future date with the given weekday (0=Mon … 6=Sun).
+    Always at least 1 day ahead so it cannot be today and trigger TIME_IN_PAST."""
+    today = date.today()
+    days_ahead = (weekday - today.weekday()) % 7 or 7
+    return today + timedelta(days=days_ahead)
+
+
+# A Wednesday in the future (day_of_week=2, which is open per default_hours)
+WEDNESDAY = _next_weekday(2)
+# A Saturday in the future (day_of_week=5, which is closed per default_hours)
+SATURDAY = _next_weekday(5)
 
 
 # ---------------------------------------------------------------------------

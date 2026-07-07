@@ -97,6 +97,10 @@ class TestTenantServiceCacheMiss:
                     [],
                     # business_hours
                     [],
+                    # operator_hours
+                    [],
+                    # business_closures
+                    [],
                 ],
             }
         )

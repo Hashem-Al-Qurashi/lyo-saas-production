@@ -16,10 +16,10 @@ def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def create_token(email: str, business_id: int) -> str:
+def create_token(email: str, business_id: int, role: str = "owner") -> str:
     expire = datetime.utcnow() + timedelta(minutes=settings.jwt_expire_minutes)
     return jwt.encode(
-        {"sub": email, "business_id": business_id, "exp": expire},
+        {"sub": email, "business_id": business_id, "role": role, "exp": expire},
         settings.jwt_secret, algorithm=settings.jwt_algorithm,
     )
 

@@ -40,6 +40,18 @@ class BookingService:
         slot = availability_service.check_slot(
             business, treatment_code, appt_date, appt_time, preferred_operator
         )
+        # If the preferred operator became busy between check_availability and booking
+        # (TOCTOU race, or AI echoed an auto-assigned operator name), fall back to
+        # auto-assign so the customer is not left with a failed booking they already confirmed.
+        if not slot.get("available") and slot.get("reason") == "PREFERRED_OPERATOR_BUSY" and preferred_operator:
+            logger.warning(
+                "Preferred operator %r busy at booking time — falling back to auto-assign "
+                "(business_id=%s, date=%s, time=%s)",
+                preferred_operator, business.id, appt_date, appt_time,
+            )
+            slot = availability_service.check_slot(
+                business, treatment_code, appt_date, appt_time, preferred_operator=None
+            )
         if not slot.get("available"):
             return {
                 "success": False,
@@ -136,10 +148,11 @@ class BookingService:
     def cancel_appointment(
         self,
         business: Business,
-        customer_name: str,
+        customer_phone: str,
         appt_date: date,
         appt_time: time,
     ) -> dict:
+        phone = customer_service._normalize_phone(customer_phone)
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -147,13 +160,13 @@ class BookingService:
                     UPDATE appointments
                     SET status = 'cancelled'
                     WHERE business_id = %s
-                      AND LOWER(customer_name) = LOWER(%s)
+                      AND customer_phone = %s
                       AND appointment_date = %s
                       AND appointment_time = %s
                       AND status = 'confirmed'
                     RETURNING id, google_event_id
                     """,
-                    (business.id, customer_name, appt_date, appt_time),
+                    (business.id, phone, appt_date, appt_time),
                 )
                 row = cur.fetchone()
                 if not row:
@@ -173,7 +186,7 @@ class BookingService:
     def modify_appointment(
         self,
         business: Business,
-        customer_name: str,
+        customer_phone: str,
         current_date: date,
         current_time: time,
         new_date: Optional[date] = None,
@@ -181,20 +194,21 @@ class BookingService:
         new_treatment: Optional[str] = None,
         new_operator: Optional[str] = None,
     ) -> dict:
+        phone = customer_service._normalize_phone(customer_phone)
         # 1. Look up the original appointment BEFORE cancelling
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, treatment_code, customer_phone, google_event_id
+                    SELECT id, treatment_code, customer_phone, google_event_id, customer_name
                     FROM appointments
                     WHERE business_id = %s
-                      AND LOWER(customer_name) = LOWER(%s)
+                      AND customer_phone = %s
                       AND appointment_date = %s
                       AND appointment_time = %s
                       AND status = 'confirmed'
                     """,
-                    (business.id, customer_name, current_date, current_time),
+                    (business.id, phone, current_date, current_time),
                 )
                 row = cur.fetchone()
                 if not row:
@@ -204,6 +218,7 @@ class BookingService:
                 original_treatment = row[1]
                 customer_phone = row[2]
                 original_event_id = row[3]
+                customer_name = row[4]
 
         target_date = new_date or current_date
         target_time = new_time or current_time

@@ -3,6 +3,7 @@ import os
 
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from management.auth import authenticate_user, create_token, decode_token
@@ -23,6 +24,9 @@ mgmt_app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret)
 
 templates_dir = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=templates_dir)
+
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+mgmt_app.mount("/manage/static", StaticFiles(directory=static_dir), name="static")
 
 
 def get_current_user(request: Request) -> dict:
@@ -71,7 +75,7 @@ async def dashboard(request: Request):
 
 
 # Import and register route modules
-from management.routes import treatments, operators, hours, settings as settings_routes, appointments, users, calendar, onboarding  # noqa: E402
+from management.routes import treatments, operators, hours, settings as settings_routes, appointments, users, calendar, onboarding, faq  # noqa: E402
 
 mgmt_app.include_router(appointments.router)
 mgmt_app.include_router(treatments.router)
@@ -81,3 +85,4 @@ mgmt_app.include_router(settings_routes.router)
 mgmt_app.include_router(users.router)
 mgmt_app.include_router(calendar.router)
 mgmt_app.include_router(onboarding.router)
+mgmt_app.include_router(faq.router)

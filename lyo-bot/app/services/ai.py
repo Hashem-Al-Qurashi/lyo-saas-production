@@ -43,7 +43,7 @@ def _openai_create_with_retry(**kwargs):
 # System prompt builder
 # ------------------------------------------------------------------
 
-def build_system_prompt(business: Business) -> str:
+def build_system_prompt(business: Business, customer_name: str | None = None) -> str:
     """Construct a dynamic system prompt for *business*."""
     dates = get_date_context(business)
 
@@ -59,13 +59,19 @@ def build_system_prompt(business: Business) -> str:
                 op_names.append(op.display_name)
         ops_str = ", ".join(op_names) if op_names else "all operators"
         price_str = f"EUR {t.price}" if t.price else "N/A"
-        services_lines.append(
+        line = (
             f"- {t.name_it}: {price_str} ({t.duration_minutes} min) "
             f"[code: {t.code}] [operators: {ops_str}]"
         )
+        if t.description_it:
+            line += f"\n  Description: {t.description_it}"
+        if t.notes:
+            line += f"\n  Note: {t.notes}"
+        services_lines.append(line)
     services_block = "\n".join(services_lines) or "No services configured."
 
     # --- Operators list ---
+    day_names_op = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     operators_lines: list[str] = []
     for op in business.operators:
         if not op.is_active:
@@ -75,7 +81,24 @@ def build_system_prompt(business: Business) -> str:
             if t.is_active and t.id in op.treatment_ids:
                 treat_names.append(t.name_it)
         treats_str = ", ".join(treat_names) if treat_names else "all services"
-        operators_lines.append(f"- {op.display_name}: {treats_str}")
+        line = f"- {op.display_name}: {treats_str}"
+        if op.notes:
+            line += f" — {op.notes}"
+        # Per-operator working hours
+        if op.hours:
+            hours_parts = []
+            for h in sorted(op.hours, key=lambda x: x.day_of_week):
+                dn = day_names_op[h.day_of_week] if h.day_of_week < 7 else "?"
+                if not h.is_working:
+                    hours_parts.append(f"{dn}: OFF")
+                elif h.start_time and h.end_time:
+                    part = f"{dn}: {h.start_time.strftime('%H:%M')}-{h.end_time.strftime('%H:%M')}"
+                    if h.break_start and h.break_end:
+                        part += f" (break {h.break_start.strftime('%H:%M')}-{h.break_end.strftime('%H:%M')})"
+                    hours_parts.append(part)
+            if hours_parts:
+                line += f"\n  Schedule: {', '.join(hours_parts)}"
+        operators_lines.append(line)
     operators_block = "\n".join(operators_lines) or "No operators configured."
 
     # --- Business hours ---
@@ -110,9 +133,49 @@ def build_system_prompt(business: Business) -> str:
             "- NEVER show internal codes (like treatment codes) to the customer.\n"
         )
 
+    # --- Salon rules ---
+    rules = business.settings.get("rules", {})
+    rules_lines: list[str] = []
+    if rules.get("deposit"):
+        rules_lines.append(f"- Deposit/advance: {rules['deposit']}")
+    if rules.get("cancellation"):
+        rules_lines.append(f"- Cancellation: {rules['cancellation']}")
+    if rules.get("punctuality"):
+        rules_lines.append(f"- Punctuality: {rules['punctuality']}")
+    if rules.get("other"):
+        rules_lines.append(f"- Other: {rules['other']}")
+    rules_block = "\n".join(rules_lines) if rules_lines else ""
+
+    # --- Rules section (only included if any rules exist) ---
+    rules_section = ""
+    if rules_block:
+        rules_section = f"\nSALON RULES:\n{rules_block}\n\n"
+
+    # --- Special closures ---
+    if business.closures:
+        closure_lines = []
+        for c in business.closures:
+            start_str = c.closure_date.strftime("%d/%m/%Y")
+            if c.closure_end_date and c.closure_end_date != c.closure_date:
+                end_str = c.closure_end_date.strftime("%d/%m/%Y")
+                date_range = f"{start_str} - {end_str}"
+            else:
+                date_range = start_str
+            reason = c.reason or "chiusura speciale"
+            closure_lines.append(f"  - {date_range}: {reason}")
+        closures_block = "\n".join(closure_lines)
+    else:
+        closures_block = "  Nessuna chiusura speciale prevista."
+
     # --- Address block ---
     address_str = business.address or "Not configured"
     phone_str = business.phone or "Not configured"
+
+    # --- Customer context block ---
+    if customer_name:
+        customer_context = f"This customer is a RETURNING client. Their name is: {customer_name}. Use this name for bookings — do NOT ask for it again."
+    else:
+        customer_context = "This is a NEW customer. Their name is not yet known — ask for it before booking."
 
     prompt = f"""You are {business.bot_name}, an employee at {business.name}.
 
@@ -139,34 +202,60 @@ OPERATORS:
 
 BUSINESS HOURS:
 {hours_block}
-
-UPCOMING DAYS CALENDAR:
+{rules_section}UPCOMING DAYS CALENDAR:
 {dates['calendar']}
+
+SPECIAL CLOSURES (beyond regular weekly schedule):
+{closures_block}
+IMPORTANT: On closure dates the salon is CLOSED even if that weekday is normally open.
+The calendar above already marks these dates as CHIUSO.
+When asked "quando riaprite?" after a closure -> look at the FIRST APERTO date in the calendar above.
+Do NOT guess or calculate reopen dates — read them directly from the calendar.
 
 WHEN CUSTOMER SAYS A DAY NAME:
 -> Look at the calendar above and use the EXACT DATE (YYYY-MM-DD).
 
-OPERATOR RULES:
-- If customer has NO operator preference -> auto-assign (system picks the first available).
-- If customer asks "chi e' disponibile?" or "who is available?" -> use get_operators_for_treatment to list operators.
-- If customer names a specific operator -> check only that operator's availability.
+WHEN CUSTOMER SAYS "settimana del X" / "la settimana di X" / "questa settimana" / "settimana prossima":
+-> This means the FULL WEEK (Lunedi-Domenica) that contains that date — NOT just that single day.
+-> Example: "settimana del 20 aprile" = the week Mon 20 Apr to Sun 26 Apr.
+-> If Monday of that week is CLOSED (giorno di chiusura) or in a closure period, the first available day is Tuesday or later.
+-> ASK the customer: "In quale giorno e a che ora preferisci in quella settimana?" — do NOT auto-pick Monday.
+-> NEVER interpret "settimana del X" as a booking request for exactly day X without confirming.
+
+OPERATOR RULES (CRITICAL):
+- Each service lists [operators: ...] — ONLY those operators can perform that service.
+- If a customer names an operator for a service they DO NOT offer -> tell the customer and suggest who does.
+  Example: Federica does NOT offer taglio donna -> say so and offer Giulia/Martina/Sara/Luca.
+- If customer has NO operator preference -> auto-assign (system picks the first available). Pass operator_name=null.
+- If customer asks "chi e' disponibile?" -> use get_operators_for_treatment to list operators.
+- If customer names a specific operator -> pass that name as operator_name.
 - ALWAYS include the assigned operator's name when confirming a booking.
+- If the customer SWITCHES to a different service mid-conversation -> re-verify operator compatibility for the NEW service before confirming.
+
+CUSTOMER CONTEXT:
+{customer_context}
 
 NAME REQUIREMENT (CRITICAL):
 - You MUST know the customer's name BEFORE booking.
-- If the customer gives service + date + time but NO name, ask for it first.
+- If CUSTOMER CONTEXT above already provides the name, use it — DO NOT ask again.
+- If the customer gave their name EARLIER in this conversation, use it — DO NOT ask again.
+- This applies even for a second booking within the same chat session.
+- If the customer gives service + date + time but NO name has been given yet, ask for it first.
 - Do NOT show a confirmation summary without the name.
 
 BOOKING FLOW:
 1. Collect: name, service, date, time.
-2. BEFORE asking "Confermi?", call check_availability to verify the slot is free.
-3. Show summary with FULL date (day, number, month, year) and ask for confirmation.
-4. ONLY after customer says yes/ok/si -> call create_appointment.
+2. Call check_availability:
+   - operator_name = the operator the customer explicitly named, OR null if no preference.
+3. Show summary with FULL date (day, number, month, year) and the assigned operator's name, then ask "Confermi?".
+4. ONLY after customer says yes/ok/si -> call create_appointment:
+   - operator_name = the operator the customer explicitly named, OR null if no preference.
+   - IMPORTANT: Do NOT forward the operator name returned by check_availability. If the customer had no preference, always pass null — the system will auto-assign.
 5. After booking confirmed, if customer says "ok"/"grazie"/"perfetto" -> just acknowledge, do NOT book again.
 
 MODIFY/CANCEL:
-- Use get_customer_appointments to look up bookings (no need to ask for phone).
-- cancel_appointment / modify_appointment use name + date + time (no IDs needed).
+- Use get_customer_appointments to look up bookings (the system knows the customer's phone).
+- cancel_appointment / modify_appointment only need date + time — the system uses the phone number to identify the customer.
 
 ESCALATION:
 - If the customer asks to speak to a human, use escalate_to_human.
@@ -197,7 +286,7 @@ class AIService:
 
         Runs up to ``MAX_TOOL_ROUNDS`` of tool-call / tool-result cycles.
         """
-        system_prompt = build_system_prompt(business)
+        system_prompt = build_system_prompt(business, customer_name=customer_name)
         tools = build_tools_for_business(business)
 
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -345,7 +434,7 @@ class AIService:
         if tool_name == "cancel_appointment":
             return booking_service.cancel_appointment(
                 business=business,
-                customer_name=args["customer_name"],
+                customer_phone=customer_phone,
                 appt_date=date.fromisoformat(args["date"]),
                 appt_time=time.fromisoformat(args["time"]),
             )
@@ -355,7 +444,7 @@ class AIService:
             new_time = time.fromisoformat(args["new_time"]) if args.get("new_time") else None
             return booking_service.modify_appointment(
                 business=business,
-                customer_name=args["customer_name"],
+                customer_phone=customer_phone,
                 current_date=date.fromisoformat(args["current_date"]),
                 current_time=time.fromisoformat(args["current_time"]),
                 new_date=new_date,

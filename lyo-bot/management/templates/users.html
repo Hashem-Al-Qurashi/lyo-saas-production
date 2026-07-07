@@ -1,47 +1,56 @@
 {% extends "base.html" %}
-{% block title %}Utenti - Lyo Management{% endblock %}
+{% block title %}Utenti - Lyo Virtual Assistant{% endblock %}
 {% block content %}
-<div class="flex justify-between items-center mb-6">
-    <h1 class="text-2xl font-bold">Utenti</h1>
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900 tracking-tight">Utenti</h1>
+    <p class="text-sm text-gray-500 mt-1">Gestisci gli utenti con accesso al pannello di gestione</p>
 </div>
 
 {% if error %}
-<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+<div class="flex items-center gap-3 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl mb-4 text-sm">
+    <svg class="w-5 h-5 text-red-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
     {{ error }}
 </div>
 {% endif %}
 
 {% if success %}
-<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
+<div class="flex items-center gap-3 bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-xl mb-4 text-sm">
+    <svg class="w-5 h-5 text-emerald-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
     {{ success }}
 </div>
 {% endif %}
 
 <!-- Add User Form -->
-<div class="bg-white p-6 rounded-lg shadow mb-6">
-    <h2 class="text-lg font-semibold mb-4">Aggiungi Utente</h2>
+<div class="card mb-6">
+    <div class="flex items-center gap-3 mb-5">
+        <div class="w-8 h-8 bg-brand-light rounded-lg flex items-center justify-center">
+            <svg class="w-4 h-4 text-brand" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"/></svg>
+        </div>
+        <h2 class="text-base font-semibold text-gray-900">Aggiungi Utente</h2>
+    </div>
     <form method="post" action="/manage/users/add" class="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Nome</label>
-            <input type="text" name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">Nome</label>
+            <input type="text" name="name" required class="form-input" placeholder="es. Marco Bianchi">
         </div>
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-            <input type="email" name="email" required class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">Email</label>
+            <input type="email" name="email" required class="form-input" placeholder="email@esempio.it">
         </div>
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
-            <input type="password" name="password" required minlength="6" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">Password</label>
+            <input type="password" name="password" required minlength="6" class="form-input">
         </div>
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Ruolo</label>
-            <select name="role" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">Ruolo</label>
+            <select name="role" class="form-input">
                 <option value="owner">Proprietario</option>
                 <option value="staff" selected>Staff</option>
             </select>
         </div>
         <div>
-            <button type="submit" class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700">
+            <button type="submit" class="btn-primary w-full justify-center">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
                 Aggiungi
             </button>
         </div>
@@ -49,73 +58,76 @@
 </div>
 
 <!-- Users Table -->
-<div class="bg-white rounded-lg shadow overflow-hidden">
-    <table class="min-w-full divide-y divide-gray-200">
-        <thead class="bg-gray-50">
+<div class="card p-0 overflow-hidden">
+    <table class="data-table">
+        <thead>
             <tr>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Nome</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ruolo</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stato</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Azioni</th>
+                <th>Nome</th>
+                <th>Email</th>
+                <th>Ruolo</th>
+                <th>Stato</th>
+                <th>Azioni</th>
             </tr>
         </thead>
-        <tbody class="bg-white divide-y divide-gray-200">
+        <tbody>
             {% for u in users %}
-            <!-- Display row -->
             <tr id="user-display-{{ u[0] }}">
-                <td class="px-6 py-4 text-sm font-medium">{{ u[1] }}</td>
-                <td class="px-6 py-4 text-sm">{{ u[2] }}</td>
-                <td class="px-6 py-4 text-sm">
+                <td>
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 bg-brand-light text-brand rounded-full flex items-center justify-center text-xs font-semibold">
+                            {{ u[1][0]|upper if u[1] else '?' }}
+                        </div>
+                        <span class="font-medium text-gray-900">{{ u[1] }}</span>
+                    </div>
+                </td>
+                <td class="text-gray-500">{{ u[2] }}</td>
+                <td>
                     {% if u[3] == 'owner' %}
-                    <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-indigo-100 text-indigo-800">Proprietario</span>
+                    <span class="badge badge-indigo">Proprietario</span>
                     {% else %}
-                    <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800">Staff</span>
+                    <span class="badge badge-gray">Staff</span>
                     {% endif %}
                 </td>
-                <td class="px-6 py-4 text-sm">
+                <td>
                     {% if u[4] %}
-                    <span class="text-green-600">Attivo</span>
+                    <span class="badge badge-green">Attivo</span>
                     {% else %}
-                    <span class="text-red-600">Disattivato</span>
+                    <span class="badge badge-red">Disattivato</span>
                     {% endif %}
                 </td>
-                <td class="px-6 py-4 text-sm space-x-2">
-                    <button onclick="toggleEdit('user', {{ u[0] }})" class="text-indigo-600 hover:text-indigo-800">Cambia Password</button>
-                    <form method="post" action="/manage/users/{{ u[0] }}/toggle" class="inline">
-                        {% if u[4] %}
-                        <button type="submit" class="text-red-600 hover:text-red-800">Disattiva</button>
-                        {% else %}
-                        <button type="submit" class="text-green-600 hover:text-green-800">Attiva</button>
-                        {% endif %}
-                    </form>
+                <td>
+                    <div class="flex items-center gap-3">
+                        <button onclick="toggleEdit('user', {{ u[0] }})" class="action-link action-edit">Cambia Password</button>
+                        <form method="post" action="/manage/users/{{ u[0] }}/toggle" class="inline">
+                            {% if u[4] %}
+                            <button type="submit" class="action-link action-delete">Disattiva</button>
+                            {% else %}
+                            <button type="submit" class="action-link text-emerald-600 hover:text-emerald-800">Attiva</button>
+                            {% endif %}
+                        </form>
+                    </div>
                 </td>
             </tr>
-            <!-- Password change row (hidden) -->
-            <tr id="user-edit-{{ u[0] }}" class="hidden bg-indigo-50">
-                <td colspan="5" class="px-6 py-4">
+            <tr id="user-edit-{{ u[0] }}" class="hidden bg-brand-light">
+                <td colspan="5" class="px-5 py-4">
                     <form method="post" action="/manage/users/{{ u[0] }}/password" class="flex items-end gap-4">
                         <div>
                             <label class="block text-xs font-medium text-gray-600 mb-1">Nuova Password per {{ u[1] }}</label>
-                            <input type="password" name="new_password" required minlength="6"
-                                   class="px-2 py-1 border border-gray-300 rounded text-sm">
+                            <input type="password" name="new_password" required minlength="6" class="form-input text-sm">
                         </div>
-                        <button type="submit" class="bg-indigo-600 text-white py-1 px-3 rounded text-sm hover:bg-indigo-700">Salva</button>
-                        <button type="button" onclick="toggleEdit('user', {{ u[0] }})" class="bg-gray-300 text-gray-700 py-1 px-3 rounded text-sm hover:bg-gray-400">Annulla</button>
+                        <button type="submit" class="btn-primary text-xs py-1.5 px-3">Salva</button>
+                        <button type="button" onclick="toggleEdit('user', {{ u[0] }})" class="btn-secondary text-xs py-1.5 px-3">Annulla</button>
                     </form>
                 </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
+    {% if not users %}
+    <div class="p-12 text-center">
+        <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+        <p class="text-gray-500 text-sm">Nessun utente configurato.</p>
+    </div>
+    {% endif %}
 </div>
-
-<script>
-function toggleEdit(prefix, id) {
-    var display = document.getElementById(prefix + '-display-' + id);
-    var edit = document.getElementById(prefix + '-edit-' + id);
-    display.classList.toggle('hidden');
-    edit.classList.toggle('hidden');
-}
-</script>
 {% endblock %}

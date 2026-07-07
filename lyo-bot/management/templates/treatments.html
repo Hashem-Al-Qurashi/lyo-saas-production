@@ -1,36 +1,51 @@
 {% extends "base.html" %}
-{% block title %}Trattamenti - Lyo Management{% endblock %}
+{% block title %}Trattamenti - Lyo Virtual Assistant{% endblock %}
 {% block content %}
-<div class="flex justify-between items-center mb-6">
-    <h1 class="text-2xl font-bold">Trattamenti</h1>
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900 tracking-tight">Trattamenti</h1>
+    <p class="text-sm text-gray-500 mt-1">Gestisci i servizi offerti dalla tua attivita</p>
 </div>
 
 <!-- Add Treatment Form -->
-<div class="bg-white p-6 rounded-lg shadow mb-6">
-    <h2 class="text-lg font-semibold mb-4">Aggiungi Trattamento</h2>
-    <form method="post" action="/manage/treatments/add" class="grid grid-cols-1 md:grid-cols-6 gap-4 items-end">
-        <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Codice</label>
-            <input type="text" name="code" required class="w-full px-3 py-2 border border-gray-300 rounded-md">
+<div class="card mb-6">
+    <div class="flex items-center gap-3 mb-5">
+        <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: #e1f4ff;">
+            <svg class="w-4 h-4" style="color: #0084d2;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+        </div>
+        <h2 class="text-base font-semibold text-gray-900">Aggiungi Trattamento</h2>
+    </div>
+    <form method="post" action="/manage/treatments/add" class="space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Nome (IT)</label>
+                <input type="text" name="name_it" required class="form-input" placeholder="es. Taglio Donna">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Nome (EN)</label>
+                <input type="text" name="name_en" class="form-input" placeholder="es. Women's Cut">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Durata (min)</label>
+                <input type="number" name="duration_minutes" required class="form-input" placeholder="30">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Prezzo (&euro;)</label>
+                <input type="number" step="0.01" name="price" value="0" class="form-input">
+            </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Descrizione (IT)</label>
+                <textarea name="description_it" rows="2" class="form-input" placeholder="Descrizione del trattamento"></textarea>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Descrizione (EN)</label>
+                <textarea name="description_en" rows="2" class="form-input" placeholder="Treatment description"></textarea>
+            </div>
         </div>
         <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Nome (IT)</label>
-            <input type="text" name="name_it" required class="w-full px-3 py-2 border border-gray-300 rounded-md">
-        </div>
-        <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Nome (EN)</label>
-            <input type="text" name="name_en" class="w-full px-3 py-2 border border-gray-300 rounded-md">
-        </div>
-        <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Durata (min)</label>
-            <input type="number" name="duration_minutes" required class="w-full px-3 py-2 border border-gray-300 rounded-md">
-        </div>
-        <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Prezzo</label>
-            <input type="number" step="0.01" name="price" value="0" class="w-full px-3 py-2 border border-gray-300 rounded-md">
-        </div>
-        <div>
-            <button type="submit" class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700">
+            <button type="submit" class="btn-primary">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
                 Aggiungi
             </button>
         </div>
@@ -38,76 +53,98 @@
 </div>
 
 <!-- Treatments Table -->
-<div class="bg-white rounded-lg shadow overflow-hidden">
-    <table class="min-w-full divide-y divide-gray-200">
-        <thead class="bg-gray-50">
+<div class="card p-0 overflow-hidden">
+    <table class="data-table">
+        <thead>
             <tr>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Codice</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Nome IT</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Nome EN</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Durata</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Prezzo</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Attivo</th>
-                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Azioni</th>
+                <th>Nome IT</th>
+                <th>Nome EN</th>
+                <th>Durata</th>
+                <th>Prezzo (&euro;)</th>
+                <th>Attivo</th>
+                <th>Azioni</th>
             </tr>
         </thead>
-        <tbody class="bg-white divide-y divide-gray-200">
+        <tbody>
             {% for t in treatments %}
-            <!-- Display row -->
             <tr id="treat-display-{{ t[0] }}">
-                <td class="px-6 py-4 text-sm">{{ t[1] }}</td>
-                <td class="px-6 py-4 text-sm">{{ t[2] }}</td>
-                <td class="px-6 py-4 text-sm">{{ t[3] or '-' }}</td>
-                <td class="px-6 py-4 text-sm">{{ t[4] }} min</td>
-                <td class="px-6 py-4 text-sm">{{ t[5] }}</td>
-                <td class="px-6 py-4 text-sm">
+                <td class="font-medium text-gray-900">{{ t[2] }}</td>
+                <td class="text-gray-500">{{ t[3] or '-' }}</td>
+                <td>
+                    <span class="inline-flex items-center gap-1 text-gray-600">
+                        <svg class="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        {{ t[4] }} min
+                    </span>
+                </td>
+                <td class="font-medium">&euro;{{ "%.2f"|format(t[5]) }}</td>
+                <td>
                     {% if t[6] %}
-                    <span class="text-green-600">Si</span>
+                    <span class="badge badge-green">Attivo</span>
                     {% else %}
-                    <span class="text-red-600">No</span>
+                    <span class="badge badge-red">Inattivo</span>
                     {% endif %}
                 </td>
-                <td class="px-6 py-4 text-sm space-x-2">
-                    <button onclick="toggleEdit('treat', {{ t[0] }})" class="text-indigo-600 hover:text-indigo-800">Modifica</button>
-                    <form method="post" action="/manage/treatments/{{ t[0] }}/delete" class="inline">
-                        <button type="submit" class="text-red-600 hover:text-red-800">Elimina</button>
-                    </form>
+                <td>
+                    <div class="flex items-center gap-3">
+                        <button onclick="toggleEdit('treat', {{ t[0] }})" class="action-link action-edit">Modifica</button>
+                        <form method="post" action="/manage/treatments/{{ t[0] }}/delete" class="inline">
+                            <button type="submit" class="action-link action-delete">Elimina</button>
+                        </form>
+                    </div>
                 </td>
             </tr>
-            <!-- Edit row (hidden by default) -->
-            <tr id="treat-edit-{{ t[0] }}" class="hidden bg-indigo-50">
-                <td colspan="7" class="px-6 py-4">
-                    <form method="post" action="/manage/treatments/{{ t[0] }}/edit" class="grid grid-cols-1 md:grid-cols-7 gap-3 items-end">
-                        <div>
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Codice</label>
-                            <input type="text" name="code" value="{{ t[1] }}" required class="w-full px-2 py-1 border border-gray-300 rounded text-sm">
+            <tr id="treat-edit-{{ t[0] }}" class="hidden bg-brand-light">
+                <td colspan="6" class="px-5 py-4">
+                    <form method="post" action="/manage/treatments/{{ t[0] }}/edit" class="space-y-3">
+                        <div class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Nome IT</label>
+                                <input type="text" name="name_it" value="{{ t[2] }}" required class="form-input text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Nome EN</label>
+                                <input type="text" name="name_en" value="{{ t[3] or '' }}" class="form-input text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Durata (min)</label>
+                                <input type="number" name="duration_minutes" value="{{ t[4] }}" required class="form-input text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Prezzo (&euro;)</label>
+                                <input type="number" step="0.01" name="price" value="{{ t[5] }}" class="form-input text-sm">
+                            </div>
+                            <div>
+                                <label class="inline-flex items-center text-xs gap-1.5 cursor-pointer">
+                                    <input type="checkbox" name="is_active" value="true" {% if t[6] %}checked{% endif %} class="rounded text-brand border-gray-300 focus:ring-brand">
+                                    Attivo
+                                </label>
+                            </div>
+                            <div class="flex gap-2">
+                                <button type="submit" class="btn-primary text-xs py-1.5 px-3">Salva</button>
+                                <button type="button" onclick="toggleEdit('treat', {{ t[0] }})" class="btn-secondary text-xs py-1.5 px-3">Annulla</button>
+                            </div>
                         </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Nome IT</label>
-                            <input type="text" name="name_it" value="{{ t[2] }}" required class="w-full px-2 py-1 border border-gray-300 rounded text-sm">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Nome EN</label>
-                            <input type="text" name="name_en" value="{{ t[3] or '' }}" class="w-full px-2 py-1 border border-gray-300 rounded text-sm">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Durata (min)</label>
-                            <input type="number" name="duration_minutes" value="{{ t[4] }}" required class="w-full px-2 py-1 border border-gray-300 rounded text-sm">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Prezzo</label>
-                            <input type="number" step="0.01" name="price" value="{{ t[5] }}" class="w-full px-2 py-1 border border-gray-300 rounded text-sm">
-                        </div>
-                        <div>
-                            <label class="inline-flex items-center text-xs">
-                                <input type="checkbox" name="is_active" value="true" {% if t[6] %}checked{% endif %} class="rounded text-indigo-600 mr-1">
-                                Attivo
-                            </label>
-                            <input type="hidden" name="sort_order" value="{{ t[7] }}">
-                        </div>
-                        <div class="flex gap-2">
-                            <button type="submit" class="bg-indigo-600 text-white py-1 px-3 rounded text-sm hover:bg-indigo-700">Salva</button>
-                            <button type="button" onclick="toggleEdit('treat', {{ t[0] }})" class="bg-gray-300 text-gray-700 py-1 px-3 rounded text-sm hover:bg-gray-400">Annulla</button>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Descrizione (IT)</label>
+                                <textarea name="description_it" rows="2" class="form-input text-sm">{{ t[8] or '' }}</textarea>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Descrizione (EN)</label>
+                                <textarea name="description_en" rows="2" class="form-input text-sm">{{ t[9] or '' }}</textarea>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Auto-addon (piega dopo)</label>
+                                <select name="auto_addon_id" class="form-input text-sm">
+                                    <option value="">Nessuno</option>
+                                    {% for other in treatments %}
+                                    {% if other[0] != t[0] and other[6] %}
+                                    <option value="{{ other[0] }}" {% if t|length > 11 and t[11] == other[0] %}selected{% endif %}>{{ other[2] }} ({{ other[4] }}min, &euro;{{ "%.2f"|format(other[5]) }})</option>
+                                    {% endif %}
+                                    {% endfor %}
+                                </select>
+                                <p class="text-[10px] text-gray-400 mt-0.5">Il bot prenota automaticamente questo trattamento subito dopo</p>
+                            </div>
                         </div>
                     </form>
                 </td>
@@ -115,14 +152,12 @@
             {% endfor %}
         </tbody>
     </table>
+    {% if not treatments %}
+    <div class="p-12 text-center">
+        <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>
+        <p class="text-gray-500 text-sm">Nessun trattamento configurato.</p>
+        <p class="text-gray-400 text-xs mt-1">Inizia aggiungendo il primo servizio.</p>
+    </div>
+    {% endif %}
 </div>
-
-<script>
-function toggleEdit(prefix, id) {
-    var display = document.getElementById(prefix + '-display-' + id);
-    var edit = document.getElementById(prefix + '-edit-' + id);
-    display.classList.toggle('hidden');
-    edit.classList.toggle('hidden');
-}
-</script>
 {% endblock %}

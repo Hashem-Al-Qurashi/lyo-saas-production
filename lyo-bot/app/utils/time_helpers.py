@@ -65,9 +65,18 @@ def generate_date_calendar(business: Business) -> str:
         day_name = _ITALIAN_DAYS[day.weekday()]
         month_name = _ITALIAN_MONTHS[day.month]
         date_str = day.strftime("%Y-%m-%d")
+        day_date = day.date()
 
-        # Determine open/closed from business hours
-        if day.weekday() in closed_days:
+        # Check special closures first (higher priority than weekly schedule)
+        closure_reason = None
+        for c in business.closures:
+            if c.covers(day_date):
+                closure_reason = c.reason or "chiusura speciale"
+                break
+
+        if closure_reason:
+            status = f"CHIUSO ({closure_reason})"
+        elif day.weekday() in closed_days:
             status = f"CHIUSO ({day_name})"
         else:
             status = "APERTO"

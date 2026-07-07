@@ -22,6 +22,8 @@ async def list_users(request: Request):
     user = _get_user(request)
     if not user:
         return RedirectResponse(url="/manage/login", status_code=302)
+    if user.get("role") not in ("owner", "admin"):
+        return RedirectResponse(url="/manage/dashboard", status_code=302)
 
     biz_id = user["business_id"]
     with get_connection() as conn:
@@ -55,9 +57,15 @@ async def add_user(
     user = _get_user(request)
     if not user:
         return RedirectResponse(url="/manage/login", status_code=302)
+    if user.get("role") not in ("owner", "admin"):
+        return RedirectResponse(url="/manage/dashboard", status_code=302)
 
     biz_id = user["business_id"]
     error = None
+
+    ALLOWED_ROLES = {"owner", "admin", "staff"}
+    if role not in ALLOWED_ROLES:
+        role = "staff"
 
     if len(password) < 6:
         error = "La password deve avere almeno 6 caratteri"
@@ -98,6 +106,8 @@ async def toggle_user(request: Request, user_id: int):
     user = _get_user(request)
     if not user:
         return RedirectResponse(url="/manage/login", status_code=302)
+    if user.get("role") not in ("owner", "admin"):
+        return RedirectResponse(url="/manage/dashboard", status_code=302)
 
     with get_connection() as conn:
         cur = conn.cursor()
@@ -119,6 +129,8 @@ async def change_password(
     user = _get_user(request)
     if not user:
         return RedirectResponse(url="/manage/login", status_code=302)
+    if user.get("role") not in ("owner", "admin"):
+        return RedirectResponse(url="/manage/dashboard", status_code=302)
 
     biz_id = user["business_id"]
 

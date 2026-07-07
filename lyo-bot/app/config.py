@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Database
-    db_host: str = "lyo-enterprise-database.cixc4kiw6r00.us-east-1.rds.amazonaws.com"
+    db_host: str = "lyo-enterprise-database-v2.cixc4kiw6r00.us-east-1.rds.amazonaws.com"
     db_port: int = 5432
     db_name: str = "lyo_production"
     db_user: str = "lyoadmin"

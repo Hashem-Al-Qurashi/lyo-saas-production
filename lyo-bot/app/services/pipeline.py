@@ -48,6 +48,10 @@ class MessagePipeline:
             logger.warning("No phone number in payload for account %s", payload.account.id)
             return
 
+        if payload.conversation and "bot_paused" in (payload.conversation.labels or []):
+            logger.info("Bot paused for conversation %s, skipping", payload.conversation.id)
+            return
+
         sender_name = payload.sender.name if payload.sender else None
         conversation_id = payload.conversation.id if payload.conversation else None
         content = payload.content or ""

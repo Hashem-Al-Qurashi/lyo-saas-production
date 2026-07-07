@@ -155,15 +155,11 @@ def build_tools_for_business(business: Business) -> list[dict]:
             "type": "function",
             "function": {
                 "name": "cancel_appointment",
-                "description": "Cancel an existing appointment.",
+                "description": "Cancel an existing appointment. The customer is identified by their phone number (known from the session) — no name needed.",
                 "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "customer_name": {
-                            "type": "string",
-                            "description": "Name of the customer.",
-                        },
                         "date": {
                             "type": "string",
                             "description": "Appointment date in YYYY-MM-DD format.",
@@ -173,7 +169,7 @@ def build_tools_for_business(business: Business) -> list[dict]:
                             "description": "Appointment time in HH:MM 24h format.",
                         },
                     },
-                    "required": ["customer_name", "date", "time"],
+                    "required": ["date", "time"],
                     "additionalProperties": False,
                 },
             },
@@ -183,15 +179,11 @@ def build_tools_for_business(business: Business) -> list[dict]:
             "type": "function",
             "function": {
                 "name": "modify_appointment",
-                "description": "Modify/reschedule an existing appointment.",
+                "description": "Modify/reschedule an existing appointment. The customer is identified by their phone number (known from the session) — no name needed.",
                 "strict": True,
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "customer_name": {
-                            "type": "string",
-                            "description": "Name of the customer.",
-                        },
                         "current_date": {
                             "type": "string",
                             "description": "Current appointment date in YYYY-MM-DD.",
@@ -216,7 +208,7 @@ def build_tools_for_business(business: Business) -> list[dict]:
                         "new_operator": _operator_param("New operator, or null to keep current."),
                     },
                     "required": [
-                        "customer_name", "current_date", "current_time",
+                        "current_date", "current_time",
                         "new_date", "new_time", "new_treatment", "new_operator",
                     ],
                     "additionalProperties": False,

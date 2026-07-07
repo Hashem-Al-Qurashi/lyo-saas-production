@@ -81,13 +81,26 @@ CREATE TABLE IF NOT EXISTS business_hours (
     UNIQUE(business_id, day_of_week)
 );
 
--- 6. Business closures (holidays, special days)
+-- 6. Business closures (holidays, special days — supports date ranges)
 CREATE TABLE IF NOT EXISTS business_closures (
     id SERIAL PRIMARY KEY,
     business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     closure_date DATE NOT NULL,
+    closure_end_date DATE,        -- NULL = single-day closure
     reason VARCHAR(255),
     UNIQUE(business_id, closure_date)
+);
+
+-- 6b. Per-operator working schedule (overrides business-hours for individual operators)
+CREATE TABLE IF NOT EXISTS operator_hours (
+    operator_id  INTEGER NOT NULL REFERENCES operators(id) ON DELETE CASCADE,
+    day_of_week  SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+    is_working   BOOLEAN NOT NULL DEFAULT true,
+    start_time   TIME,            -- NULL = use business default
+    end_time     TIME,            -- NULL = use business default
+    break_start  TIME,            -- NULL = no break
+    break_end    TIME,            -- NULL = no break
+    PRIMARY KEY (operator_id, day_of_week)
 );
 
 -- 7. Customers (mandatory name DB per business)
@@ -159,6 +172,10 @@ CREATE TABLE IF NOT EXISTS management_users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Migrations (idempotent)
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS parent_appointment_id INTEGER REFERENCES appointments(id) ON DELETE SET NULL;
+ALTER TABLE treatments ADD COLUMN IF NOT EXISTS auto_addon_id INTEGER REFERENCES treatments(id) ON DELETE SET NULL;
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_operators_business ON operators(business_id);

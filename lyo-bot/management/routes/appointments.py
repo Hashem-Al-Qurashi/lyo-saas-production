@@ -45,7 +45,7 @@ async def list_appointments(
 
         query = """
             SELECT id, customer_name, customer_phone, treatment_name, treatment_code,
-                   operator_name, appointment_date::text, appointment_time::text,
+                   operator_name, appointment_date::text, TO_CHAR(appointment_time, 'HH24:MI'),
                    duration_minutes, status, price
             FROM appointments
             WHERE business_id = %s AND appointment_date = %s
