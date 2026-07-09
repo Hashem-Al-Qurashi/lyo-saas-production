@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 480
 
+    # Super-admin
+    superadmin_email: str = "admin@lyo.ai"
+    superadmin_password: str = "change-me-superadmin"
+
     # Webhook security
     webhook_secret: str = ""
 

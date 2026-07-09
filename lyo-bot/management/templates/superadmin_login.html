@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Super Admin - Lyo{% endblock %}
+{% block content %}
+<div class="min-h-screen flex">
+    <!-- Brand panel -->
+    <div class="hidden lg:flex lg:w-1/2 items-center justify-center p-12 relative overflow-hidden" style="background: linear-gradient(160deg, #f8fafc 0%, #e1f4ff 50%, #f0f7ff 100%);">
+        <div class="absolute top-1/4 left-1/3 w-[400px] h-[400px] rounded-full opacity-30" style="background: radial-gradient(circle, rgba(0,132,210,0.12) 0%, transparent 70%); filter: blur(60px);"></div>
+        <div class="relative max-w-md text-center animate-fade-in">
+            <div class="relative inline-block mb-10">
+                <img src="/manage/static/lyo-logo.png" alt="Lyo" class="w-28 h-28 mx-auto object-contain relative z-10 drop-shadow-lg animate-float" style="animation-delay: -1s;">
+            </div>
+            <h2 class="text-[2.5rem] font-extrabold text-ink mb-3 leading-tight tracking-tight">Lyo Super<br>Admin</h2>
+            <p class="text-ink-tertiary text-xs leading-relaxed uppercase tracking-[0.2em] font-semibold">Platform Management<br>Restricted Access</p>
+        </div>
+    </div>
+
+    <!-- Login form -->
+    <div class="flex-1 flex items-center justify-center p-6 sm:p-8 bg-surface relative">
+        <div class="w-full max-w-[380px]">
+            <div class="lg:hidden text-center mb-10">
+                <img src="/manage/static/lyo-logo.png" alt="Lyo" class="w-16 h-16 mx-auto object-contain mb-3">
+                <h1 class="text-2xl font-extrabold text-ink tracking-tight">Super Admin</h1>
+            </div>
+
+            <div class="bg-white p-8 rounded-3xl shadow-lifted border border-black/[0.04]">
+                <div class="flex items-center gap-2 mb-1">
+                    <svg class="w-5 h-5 text-brand" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                    <h2 class="text-xl font-bold text-ink">Accesso Admin</h2>
+                </div>
+                <p class="text-[13px] text-ink-tertiary mb-7">Pannello riservato alla gestione della piattaforma</p>
+
+                {% if error %}
+                <div class="flex items-center gap-3 bg-red-50 border border-red-200/60 text-red-700 px-4 py-3 rounded-xl mb-5 text-sm font-medium">
+                    <svg class="w-5 h-5 text-red-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    {{ error }}
+                </div>
+                {% endif %}
+
+                <form method="post" action="/superadmin/login" class="space-y-5">
+                    <div>
+                        <label class="block text-[13px] font-semibold text-ink-secondary mb-2">Email</label>
+                        <input type="email" name="email" required autofocus
+                               class="w-full px-4 py-3 border-[1.5px] border-ink-faint/60 rounded-xl focus:outline-none focus:border-brand focus:ring-[3px] focus:ring-brand-glow transition-all duration-200 text-[14px] bg-surface/50 placeholder:text-ink-tertiary"
+                               placeholder="admin@lyo.ai">
+                    </div>
+                    <div>
+                        <label class="block text-[13px] font-semibold text-ink-secondary mb-2">Password</label>
+                        <input type="password" name="password" required
+                               class="w-full px-4 py-3 border-[1.5px] border-ink-faint/60 rounded-xl focus:outline-none focus:border-brand focus:ring-[3px] focus:ring-brand-glow transition-all duration-200 text-[14px] bg-surface/50 placeholder:text-ink-tertiary"
+                               placeholder="&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;">
+                    </div>
+                    <button type="submit" class="w-full btn-primary py-3 justify-center text-sm rounded-xl mt-1">
+                        Accedi
+                    </button>
+                </form>
+            </div>
+            <p class="text-center text-[11px] text-ink-tertiary mt-8 font-medium tracking-wide">Powered by Lyo &middot; Platform Admin</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
