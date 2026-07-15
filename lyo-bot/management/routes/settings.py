@@ -5,6 +5,7 @@ from fastapi.templating import Jinja2Templates
 from management.auth import decode_token
 from app.models.database import get_connection
 from app.services.tenant import tenant_service
+from app.config import settings
 
 router = APIRouter()
 templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
@@ -47,6 +48,7 @@ async def show_settings(request: Request):
 
     return templates.TemplateResponse("settings.html", {
         "request": request, "user": user, "business": biz,
+        "meta_app_id": settings.meta_app_id,
     })
 
 

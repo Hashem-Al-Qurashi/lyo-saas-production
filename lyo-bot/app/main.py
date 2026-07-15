@@ -1,14 +1,16 @@
 import asyncio
 import logging
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app.config import settings
 from app.models.schemas import WebhookPayload
 from app.services.pipeline import pipeline
 from app.services.reminders import reminder_service
+from app.services.tenant import tenant_service
+from app.services import whatsapp as whatsapp_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +52,68 @@ async def health():
 
     status = "ok" if db_ok else "degraded"
     return {"status": status, "version": "2.0.0", "db": "connected" if db_ok else "unavailable"}
+
+
+@app.get("/webhook/whatsapp")
+async def whatsapp_verify(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_challenge: str = Query(None, alias="hub.challenge"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"),
+):
+    """Meta webhook verification challenge."""
+    if hub_mode == "subscribe" and hub_verify_token == settings.meta_verify_token:
+        return PlainTextResponse(hub_challenge or "")
+    return JSONResponse({"error": "forbidden"}, status_code=403)
+
+
+@app.post("/webhook/whatsapp")
+async def whatsapp_direct_webhook(request: Request):
+    """Receive WhatsApp Cloud API messages directly from Meta."""
+    try:
+        raw = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    asyncio.create_task(_process_whatsapp_message(raw))
+    return {"status": "received"}
+
+
+async def _process_whatsapp_message(raw: dict):
+    """Parse Meta Cloud API payload and run the AI pipeline."""
+    try:
+        entries = raw.get("entry", [])
+        for entry in entries:
+            for change in entry.get("changes", []):
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+                if not messages:
+                    continue
+
+                msg = messages[0]
+                if msg.get("type") != "text":
+                    continue
+
+                phone_number_id = value.get("metadata", {}).get("phone_number_id")
+                sender_phone = msg.get("from")
+                text = msg.get("text", {}).get("body", "").strip()
+
+                if not phone_number_id or not sender_phone or not text:
+                    continue
+
+                business = tenant_service.get_business_by_phone_id(phone_number_id)
+                if not business:
+                    logger.warning("No business for phone_number_id %s", phone_number_id)
+                    continue
+                if not business.meta_access_token:
+                    logger.error("Business %s has no meta_access_token", business.id)
+                    continue
+
+                reply = await pipeline.process_direct(business, sender_phone, text)
+                if reply:
+                    await whatsapp_service.send_message(
+                        phone_number_id, business.meta_access_token, sender_phone, reply
+                    )
+    except Exception:
+        logger.exception("Error processing direct WhatsApp message")
 
 
 @app.post("/webhook/chatwoot")

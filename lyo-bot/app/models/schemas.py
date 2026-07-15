@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 class Business(BaseModel):
     id: int
-    chatwoot_account_id: int
+    chatwoot_account_id: Optional[int] = None
     name: str
     slug: Optional[str] = None
     timezone: str = "Europe/Rome"
@@ -24,6 +24,8 @@ class Business(BaseModel):
     owner_email: Optional[str] = None
     status: str = "active"
     settings: dict = Field(default_factory=dict)
+    whatsapp_phone_number_id: Optional[str] = None
+    meta_access_token: Optional[str] = None
     # Loaded relations
     operators: List[Operator] = Field(default_factory=list)
     treatments: List[Treatment] = Field(default_factory=list)

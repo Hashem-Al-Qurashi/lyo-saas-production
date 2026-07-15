@@ -15,6 +15,7 @@ class TenantService:
 
     def __init__(self):
         self._cache: dict[int, tuple[Business, float]] = {}
+        self._phone_cache: dict[str, tuple[Business, float]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -36,6 +37,20 @@ class TenantService:
             self._cache[chatwoot_account_id] = (business, time.time())
         return business
 
+    def get_business_by_phone_id(self, phone_number_id: str) -> Optional[Business]:
+        """Return a fully-loaded Business keyed by WhatsApp phone_number_id. Uses cache."""
+        cached = self._phone_cache.get(phone_number_id)
+        if cached:
+            business, ts = cached
+            if time.time() - ts < CACHE_TTL:
+                return business
+            del self._phone_cache[phone_number_id]
+
+        business = self._load_by_phone_id(phone_number_id)
+        if business:
+            self._phone_cache[phone_number_id] = (business, time.time())
+        return business
+
     def invalidate(self, chatwoot_account_id: int) -> None:
         self._cache.pop(chatwoot_account_id, None)
 
@@ -52,198 +67,219 @@ class TenantService:
     # Private
     # ------------------------------------------------------------------
 
-    def _load_from_db(self, chatwoot_account_id: int) -> Optional[Business]:
-        """Query DB and build a Business with operators, treatments, hours."""
+    def _load_by_phone_id(self, phone_number_id: str) -> Optional[Business]:
         try:
             with get_connection() as conn:
                 with conn.cursor() as cur:
-                    # 1. Business row
                     cur.execute(
-                        """
-                        SELECT id, chatwoot_account_id, name, slug, timezone,
-                               language, bot_name, bot_persona, address, phone,
-                               email, google_calendar_id,
-                               google_service_account_json, owner_email,
-                               status, settings
-                        FROM businesses
-                        WHERE chatwoot_account_id = %s AND status = 'active'
-                        """,
+                        "SELECT id FROM businesses WHERE whatsapp_phone_number_id = %s AND status = 'active'",
+                        (phone_number_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        logger.warning("No active business for phone_number_id %s", phone_number_id)
+                        return None
+                    return self._load_full(cur, row[0])
+        except Exception:
+            logger.exception("Failed to load business for phone_number_id %s", phone_number_id)
+            return None
+
+    def _load_from_db(self, chatwoot_account_id: int) -> Optional[Business]:
+        try:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id FROM businesses WHERE chatwoot_account_id = %s AND status = 'active'",
                         (chatwoot_account_id,),
                     )
                     row = cur.fetchone()
                     if not row:
                         logger.warning("No active business for account %s", chatwoot_account_id)
                         return None
-
-                    business = Business(
-                        id=row[0],
-                        chatwoot_account_id=row[1],
-                        name=row[2],
-                        slug=row[3],
-                        timezone=row[4],
-                        language=row[5],
-                        bot_name=row[6],
-                        bot_persona=row[7],
-                        address=row[8],
-                        phone=row[9],
-                        email=row[10],
-                        google_calendar_id=row[11] or "primary",
-                        google_service_account_json=row[12],
-                        owner_email=row[13],
-                        status=row[14],
-                        settings=row[15] if isinstance(row[15], dict) else {},
-                    )
-                    bid = business.id
-
-                    # 2. Treatments
-                    cur.execute(
-                        """
-                        SELECT id, business_id, code, name_it, name_en,
-                               description_it, description_en,
-                               duration_minutes, price, is_active, sort_order, notes,
-                               auto_addon_id
-                        FROM treatments
-                        WHERE business_id = %s AND is_active = true
-                        ORDER BY sort_order
-                        """,
-                        (bid,),
-                    )
-                    treatments = []
-                    treatment_map: dict[int, Treatment] = {}
-                    for t in cur.fetchall():
-                        treat = Treatment(
-                            id=t[0], business_id=t[1], code=t[2],
-                            name_it=t[3], name_en=t[4],
-                            description_it=t[5], description_en=t[6],
-                            duration_minutes=t[7], price=t[8],
-                            is_active=t[9], sort_order=t[10], notes=t[11],
-                            auto_addon_id=t[12],
-                        )
-                        treatments.append(treat)
-                        treatment_map[treat.id] = treat
-
-                    # 3. Operators
-                    cur.execute(
-                        """
-                        SELECT id, business_id, technical_id, display_name,
-                               is_active, sort_order, notes
-                        FROM operators
-                        WHERE business_id = %s AND is_active = true
-                        ORDER BY sort_order
-                        """,
-                        (bid,),
-                    )
-                    operators = []
-                    operator_map: dict[int, Operator] = {}
-                    for o in cur.fetchall():
-                        op = Operator(
-                            id=o[0], business_id=o[1], technical_id=o[2],
-                            display_name=o[3], is_active=o[4],
-                            sort_order=o[5], notes=o[6],
-                        )
-                        operators.append(op)
-                        operator_map[op.id] = op
-
-                    # 4. Operator-treatment links
-                    cur.execute(
-                        """
-                        SELECT operator_id, treatment_id
-                        FROM operator_treatments
-                        WHERE operator_id IN (
-                            SELECT id FROM operators WHERE business_id = %s
-                        )
-                        """,
-                        (bid,),
-                    )
-                    for ot in cur.fetchall():
-                        op_id, treat_id = ot[0], ot[1]
-                        if op_id in operator_map:
-                            operator_map[op_id].treatment_ids.append(treat_id)
-                        if treat_id in treatment_map:
-                            treatment_map[treat_id].operator_ids.append(op_id)
-
-                    # 5. Business hours
-                    cur.execute(
-                        """
-                        SELECT business_id, day_of_week, is_open, open_time, close_time
-                        FROM business_hours
-                        WHERE business_id = %s
-                        ORDER BY day_of_week
-                        """,
-                        (bid,),
-                    )
-                    hours = []
-                    for h in cur.fetchall():
-                        hours.append(
-                            BusinessHours(
-                                business_id=h[0], day_of_week=h[1],
-                                is_open=h[2], open_time=h[3], close_time=h[4],
-                            )
-                        )
-
-                    # 6. Operator hours (per-day schedule)
-                    if operators:
-                        op_ids = [op.id for op in operators]
-                        cur.execute(
-                            """
-                            SELECT operator_id, day_of_week, is_working, start_time, end_time,
-                                   break_start, break_end
-                            FROM operator_hours
-                            WHERE operator_id = ANY(%s)
-                            ORDER BY operator_id, day_of_week
-                            """,
-                            (op_ids,),
-                        )
-                        for oh in cur.fetchall():
-                            op_id = oh[0]
-                            if op_id in operator_map:
-                                operator_map[op_id].hours.append(
-                                    OperatorHours(
-                                        operator_id=oh[0],
-                                        day_of_week=oh[1],
-                                        is_working=oh[2],
-                                        start_time=oh[3],
-                                        end_time=oh[4],
-                                        break_start=oh[5],
-                                        break_end=oh[6],
-                                    )
-                                )
-
-                    # 7. Business closures (current + future)
-                    cur.execute(
-                        """
-                        SELECT business_id, closure_date, closure_end_date, reason
-                        FROM business_closures
-                        WHERE business_id = %s
-                          AND COALESCE(closure_end_date, closure_date) >= CURRENT_DATE
-                        ORDER BY closure_date
-                        """,
-                        (bid,),
-                    )
-                    closures = [
-                        BusinessClosure(
-                            business_id=c[0],
-                            closure_date=c[1],
-                            closure_end_date=c[2],
-                            reason=c[3],
-                        )
-                        for c in cur.fetchall()
-                    ]
-
-                    business.operators = operators
-                    business.treatments = treatments
-                    business.hours = hours
-                    business.closures = closures
-
-                    logger.info(
-                        "Loaded business '%s' (id=%s): %d operators, %d treatments, %d hour-rules",
-                        business.name, bid, len(operators), len(treatments), len(hours),
-                    )
-                    return business
-
+                    return self._load_full(cur, row[0])
         except Exception:
             logger.exception("Failed to load business for account %s", chatwoot_account_id)
             return None
+
+    def _load_full(self, cur, business_id: int) -> Optional[Business]:
+        """Load complete Business (all relations) by PK using an existing cursor."""
+        # Business row
+        cur.execute(
+            """
+            SELECT id, chatwoot_account_id, name, slug, timezone,
+                   language, bot_name, bot_persona, address, phone,
+                   email, google_calendar_id,
+                   google_service_account_json, owner_email,
+                   status, settings,
+                   whatsapp_phone_number_id, meta_access_token
+            FROM businesses
+            WHERE id = %s AND status = 'active'
+            """,
+            (business_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+
+        business = Business(
+            id=row[0],
+            chatwoot_account_id=row[1],
+            name=row[2],
+            slug=row[3],
+            timezone=row[4],
+            language=row[5],
+            bot_name=row[6],
+            bot_persona=row[7],
+            address=row[8],
+            phone=row[9],
+            email=row[10],
+            google_calendar_id=row[11] or "primary",
+            google_service_account_json=row[12],
+            owner_email=row[13],
+            status=row[14],
+            settings=row[15] if isinstance(row[15], dict) else {},
+            whatsapp_phone_number_id=row[16],
+            meta_access_token=row[17],
+        )
+        bid = business.id
+
+        # Treatments
+        cur.execute(
+            """
+            SELECT id, business_id, code, name_it, name_en,
+                   description_it, description_en,
+                   duration_minutes, price, is_active, sort_order, notes,
+                   auto_addon_id
+            FROM treatments
+            WHERE business_id = %s AND is_active = true
+            ORDER BY sort_order
+            """,
+            (bid,),
+        )
+        treatments = []
+        treatment_map: dict[int, Treatment] = {}
+        for t in cur.fetchall():
+            treat = Treatment(
+                id=t[0], business_id=t[1], code=t[2],
+                name_it=t[3], name_en=t[4],
+                description_it=t[5], description_en=t[6],
+                duration_minutes=t[7], price=t[8],
+                is_active=t[9], sort_order=t[10], notes=t[11],
+                auto_addon_id=t[12],
+            )
+            treatments.append(treat)
+            treatment_map[treat.id] = treat
+
+        # Operators
+        cur.execute(
+            """
+            SELECT id, business_id, technical_id, display_name,
+                   is_active, sort_order, notes
+            FROM operators
+            WHERE business_id = %s AND is_active = true
+            ORDER BY sort_order
+            """,
+            (bid,),
+        )
+        operators = []
+        operator_map: dict[int, Operator] = {}
+        for o in cur.fetchall():
+            op = Operator(
+                id=o[0], business_id=o[1], technical_id=o[2],
+                display_name=o[3], is_active=o[4],
+                sort_order=o[5], notes=o[6],
+            )
+            operators.append(op)
+            operator_map[op.id] = op
+
+        # Operator-treatment links
+        cur.execute(
+            """
+            SELECT operator_id, treatment_id
+            FROM operator_treatments
+            WHERE operator_id IN (
+                SELECT id FROM operators WHERE business_id = %s
+            )
+            """,
+            (bid,),
+        )
+        for ot in cur.fetchall():
+            op_id, treat_id = ot[0], ot[1]
+            if op_id in operator_map:
+                operator_map[op_id].treatment_ids.append(treat_id)
+            if treat_id in treatment_map:
+                treatment_map[treat_id].operator_ids.append(op_id)
+
+        # Business hours
+        cur.execute(
+            """
+            SELECT business_id, day_of_week, is_open, open_time, close_time
+            FROM business_hours
+            WHERE business_id = %s
+            ORDER BY day_of_week
+            """,
+            (bid,),
+        )
+        hours = [
+            BusinessHours(
+                business_id=h[0], day_of_week=h[1],
+                is_open=h[2], open_time=h[3], close_time=h[4],
+            )
+            for h in cur.fetchall()
+        ]
+
+        # Operator hours
+        if operators:
+            cur.execute(
+                """
+                SELECT operator_id, day_of_week, is_working, start_time, end_time,
+                       break_start, break_end
+                FROM operator_hours
+                WHERE operator_id = ANY(%s)
+                ORDER BY operator_id, day_of_week
+                """,
+                ([op.id for op in operators],),
+            )
+            for oh in cur.fetchall():
+                op_id = oh[0]
+                if op_id in operator_map:
+                    operator_map[op_id].hours.append(
+                        OperatorHours(
+                            operator_id=oh[0], day_of_week=oh[1],
+                            is_working=oh[2], start_time=oh[3], end_time=oh[4],
+                            break_start=oh[5], break_end=oh[6],
+                        )
+                    )
+
+        # Business closures (current + future)
+        cur.execute(
+            """
+            SELECT business_id, closure_date, closure_end_date, reason
+            FROM business_closures
+            WHERE business_id = %s
+              AND COALESCE(closure_end_date, closure_date) >= CURRENT_DATE
+            ORDER BY closure_date
+            """,
+            (bid,),
+        )
+        closures = [
+            BusinessClosure(
+                business_id=c[0], closure_date=c[1],
+                closure_end_date=c[2], reason=c[3],
+            )
+            for c in cur.fetchall()
+        ]
+
+        business.operators = operators
+        business.treatments = treatments
+        business.hours = hours
+        business.closures = closures
+
+        logger.info(
+            "Loaded business '%s' (id=%s): %d operators, %d treatments, %d hour-rules",
+            business.name, bid, len(operators), len(treatments), len(hours),
+        )
+        return business
 
 
 # Singleton

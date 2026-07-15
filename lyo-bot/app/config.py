@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     superadmin_email: str = "admin@lyo.ai"
     superadmin_password: str = "change-me-superadmin"
 
+    # Meta / WhatsApp Business API
+    meta_app_id: str = ""
+    meta_app_secret: str = ""
+    meta_verify_token: str = "lyo-whatsapp-verify"
+
     # Webhook security
     webhook_secret: str = ""
 

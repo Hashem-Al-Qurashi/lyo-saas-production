@@ -100,6 +100,7 @@
 {% endif %}
 
 <script>
+// ── WhatsApp status check ──────────────────────────────────────────────────
 fetch('/manage/api/whatsapp/status')
     .then(r => r.json())
     .then(data => {
@@ -108,13 +109,100 @@ fetch('/manage/api/whatsapp/status')
                 '<div class="flex items-center gap-3 bg-green-50 border border-green-200 px-4 py-3 rounded-xl">' +
                 '<svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
                 '<div><p class="text-green-700 font-medium text-sm">WhatsApp collegato</p>' +
-                '<p class="text-green-600 text-xs">ID: ' + data.phone_number_id + '</p></div></div>';
+                '<p class="text-green-600 text-xs">Numero ID: ' + data.phone_number_id + '</p></div>' +
+                '</div>';
         }
     })
     .catch(() => {});
 
-document.getElementById('wa-connect-btn')?.addEventListener('click', function() {
-    alert('Meta Embedded Signup richiede la registrazione come Tech Provider. Contatta il supporto per la configurazione.');
+// ── Meta Embedded Signup ──────────────────────────────────────────────────
+{% if meta_app_id %}
+// Load Facebook SDK
+window.fbAsyncInit = function() {
+    FB.init({ appId: '{{ meta_app_id }}', version: 'v19.0', xfbml: false, cookie: false });
+};
+(function(d, s, id) {
+    var js, fjs = d.getElementsByTagName(s)[0];
+    if (d.getElementById(id)) return;
+    js = d.createElement(s); js.id = id;
+    js.src = 'https://connect.facebook.net/en_US/sdk.js';
+    fjs.parentNode.insertBefore(js, fjs);
+}(document, 'script', 'facebook-jssdk'));
+
+// Listen for Embedded Signup events (phone_number_id, waba_id come via postMessage)
+var _waPhoneNumberId = null;
+var _waWabaId = null;
+window.addEventListener('message', function(event) {
+    if (event.origin !== 'https://www.facebook.com') return;
+    try {
+        var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (data.type === 'WA_EMBEDDED_SIGNUP' && data.event === 'FINISH') {
+            _waPhoneNumberId = data.data && data.data.phone_number_id;
+            _waWabaId = data.data && data.data.waba_id;
+        }
+    } catch(e) {}
 });
+
+document.getElementById('wa-connect-btn').addEventListener('click', function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Connessione…';
+
+    FB.login(function(response) {
+        if (!response.authResponse) {
+            btn.disabled = false;
+            btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg> Collega WhatsApp';
+            return;
+        }
+
+        var token = response.authResponse.code || response.authResponse.accessToken;
+
+        // Get CSRF token from meta tag (injected by CSRFMiddleware)
+        var csrfToken = document.querySelector('meta[name="csrf-token"]');
+        csrfToken = csrfToken ? csrfToken.getAttribute('content') : '';
+
+        fetch('/manage/api/whatsapp/callback', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken,
+            },
+            body: JSON.stringify({
+                phone_number_id: _waPhoneNumberId || '',
+                waba_id: _waWabaId || '',
+                access_token: token,
+            }),
+        })
+        .then(r => r.json())
+        .then(function(data) {
+            if (data.status === 'connected') {
+                document.getElementById('wa-status').innerHTML =
+                    '<div class="flex items-center gap-3 bg-green-50 border border-green-200 px-4 py-3 rounded-xl">' +
+                    '<svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+                    '<div><p class="text-green-700 font-medium text-sm">WhatsApp collegato</p>' +
+                    '<p class="text-green-600 text-xs">Numero ID: ' + data.phone_number_id + '</p></div>' +
+                    '</div>';
+                if (typeof showToast === 'function') showToast('WhatsApp collegato con successo!', 'success');
+            } else {
+                if (typeof showToast === 'function') showToast('Errore: ' + (data.error || 'riprova'), 'error');
+                btn.disabled = false;
+                btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg> Collega WhatsApp';
+            }
+        })
+        .catch(function() {
+            if (typeof showToast === 'function') showToast('Errore di rete, riprova.', 'error');
+            btn.disabled = false;
+        });
+    }, {
+        scope: 'whatsapp_business_management,whatsapp_business_messaging',
+        response_type: 'code',
+        extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
+    });
+});
+{% else %}
+document.getElementById('wa-connect-btn').addEventListener('click', function() {
+    alert('Configurazione Meta non ancora attiva. Contatta il supporto Lyo.');
+});
+{% endif %}
 </script>
 {% endblock %}

@@ -32,6 +32,32 @@ class MessagePipeline:
     # Public entry point
     # ------------------------------------------------------------------
 
+    async def process_direct(self, business, phone: str, text: str) -> Optional[str]:
+        """Process a message from the direct WhatsApp Cloud API path. Returns reply text."""
+        try:
+            customer = await asyncio.to_thread(
+                customer_service.get_or_create, business.id, phone,
+            )
+            history = await asyncio.to_thread(
+                self._load_conversation_history, business.id, phone,
+            )
+            reply = await ai_service.process_message(
+                business=business,
+                customer_phone=phone,
+                message=text,
+                conversation_history=history,
+                customer_name=customer.full_name,
+                conversation_id=None,
+                account_id=None,
+            )
+            await asyncio.to_thread(
+                self._save_conversation, business.id, phone, None, text, reply, history,
+            )
+            return reply
+        except Exception:
+            logger.exception("Error in process_direct for business %s phone %s", business.id, phone)
+            return None
+
     async def process(self, payload: WebhookPayload) -> None:
         """Handle an incoming webhook payload."""
         if not payload.account:
