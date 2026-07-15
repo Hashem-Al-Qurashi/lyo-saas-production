@@ -124,6 +124,10 @@
     var treatmentData = [];
     var operatorData = [];
 
+    // Apple system color palette — assigned round-robin to operators
+    var APPLE_PALETTE = ['#007AFF','#FF3B30','#FF9500','#34C759','#5856D6','#FF2D55','#5AC8FA','#AF52DE','#FF6B35','#00C7BE'];
+    var OPERATOR_COLOR_MAP = {};  // operator id → hex color
+
     // --- Status badge helpers ---
     var STATUS_LABELS = {confirmed: 'Confermato', completed: 'Completato', cancelled: 'Cancellato'};
     var STATUS_CLASSES = {
@@ -295,7 +299,21 @@
             var dateStr = calendar ? calendar.getDate().toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
             fetch('/manage/api/operators?date=' + dateStr)
                 .then(function(r) { return r.json(); })
-                .then(successCallback)
+                .then(function(data) {
+                    var colorIdx = 0;
+                    data.forEach(function(res) {
+                        if (res.id === 'unassigned') {
+                            res.eventColor = '#8E8E93';
+                            OPERATOR_COLOR_MAP['unassigned'] = '#8E8E93';
+                        } else {
+                            var col = APPLE_PALETTE[colorIdx % APPLE_PALETTE.length];
+                            res.eventColor = col;
+                            OPERATOR_COLOR_MAP[String(res.id)] = col;
+                            colorIdx++;
+                        }
+                    });
+                    successCallback(data);
+                })
                 .catch(failureCallback);
         },
         events: {url: '/manage/api/appointments', method: 'GET'},
@@ -360,9 +378,27 @@
             openModal(dateStr, timeStr, resourceId);
         },
 
+        resourceLabelDidMount: function(info) {
+            var col = OPERATOR_COLOR_MAP[String(info.resource.id)] || '#8E8E93';
+            var cushion = info.el.querySelector('.fc-col-header-cell-cushion');
+            if (cushion) {
+                var dot = document.createElement('span');
+                dot.style.cssText = 'display:inline-block;width:8px;height:8px;border-radius:50%;background:' + col + ';flex-shrink:0;';
+                cushion.insertBefore(dot, cushion.firstChild);
+            }
+        },
+
         eventDidMount: function(info) {
             // Track drag start/end to pause auto-refresh during drags
             info.el.addEventListener('mousedown', function() { isDragging = true; });
+            // Apply operator color — FullCalendar sets eventColor on resource but eventDidMount
+            // lets us ensure white text and override any leftover status color logic.
+            var resources = info.event.getResources();
+            var opId = resources.length > 0 ? String(resources[0].id) : null;
+            var col = (opId && OPERATOR_COLOR_MAP[opId]) ? OPERATOR_COLOR_MAP[opId] : '#007AFF';
+            info.el.style.backgroundColor = col;
+            info.el.style.borderColor = 'transparent';
+            info.el.style.color = '#ffffff';
         },
 
         datesSet: function() {
@@ -422,79 +458,162 @@
 </script>
 
 <style>
+    /* ── Apple-quality calendar design ─────────────────────────────── */
+
+    /* Buttons — Apple system blue */
     .fc .fc-button-primary {
-        background: #0084d2 !important;
+        background: #007AFF !important;
         border: none !important;
-        border-radius: 0.5rem !important;
+        border-radius: 8px !important;
         font-size: 0.8125rem !important;
         font-weight: 500 !important;
-        padding: 0.375rem 0.75rem !important;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
+        padding: 0.375rem 0.875rem !important;
+        box-shadow: none !important;
+        letter-spacing: -0.01em !important;
+        transition: opacity 0.12s ease !important;
     }
-    .fc .fc-button-primary:hover {
-        background: #006bad !important;
+    .fc .fc-button-primary:hover:not(:disabled) {
+        background: #0071E3 !important;
+        opacity: 0.9 !important;
     }
-    .fc .fc-button-primary:not(:disabled).fc-button-active {
-        background: #005a91 !important;
+    .fc .fc-button-primary:not(:disabled).fc-button-active,
+    .fc .fc-button-primary:not(:disabled):active {
+        background: #0058C4 !important;
+        opacity: 1 !important;
     }
-    .fc .fc-today-button { text-transform: capitalize; }
+    .fc .fc-button-primary:disabled {
+        opacity: 0.4 !important;
+    }
+    .fc .fc-today-button { text-transform: capitalize !important; }
+
+    /* Events — solid operator color, white text, soft shadow */
     .fc-event {
         cursor: pointer;
         border: none !important;
-        font-size: 0.75rem;
-        padding: 3px 6px;
-        border-radius: 0.375rem !important;
+        border-radius: 6px !important;
+        font-size: 0.6875rem !important;
+        font-weight: 500 !important;
+        padding: 2px 7px 3px !important;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.15), 0 0.5px 1px rgba(0,0,0,0.08) !important;
+        transition: filter 0.1s ease !important;
     }
+    .fc-event:hover {
+        filter: brightness(0.92) !important;
+    }
+    .fc-event .fc-event-title {
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .fc-event .fc-event-time {
+        font-size: 0.625rem;
+        font-weight: 400;
+        opacity: 0.82;
+    }
+
+    /* Column headers — white, clean, name with colored identity dot */
     .fc .fc-col-header-cell {
-        background-color: #f9fafb;
-        font-weight: 600;
-        font-size: 0.8125rem;
-        color: #374151;
+        background-color: #ffffff !important;
+        border-bottom: 1.5px solid rgba(0,0,0,0.08) !important;
     }
     .fc .fc-col-header-cell-cushion {
-        font-size: 0.8125rem;
-        font-weight: 600;
-        color: #374151;
+        font-size: 0.8125rem !important;
+        font-weight: 600 !important;
+        color: #1C1C1E !important;
         text-decoration: none !important;
+        padding: 10px 10px !important;
+        letter-spacing: -0.015em !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 6px !important;
     }
-    .fc .fc-timegrid-slot { height: 2.5em; }
+
+    /* Time slots */
+    .fc .fc-timegrid-slot { height: 2.25em; }
     .fc .fc-timegrid-slot-label-cushion {
-        font-size: 0.75rem;
-        color: #6b7280;
+        font-size: 0.6875rem !important;
+        color: #8E8E93 !important;
+        font-weight: 400 !important;
+        letter-spacing: 0 !important;
     }
+    .fc .fc-timegrid-slot-minor {
+        border-top-style: dashed !important;
+        border-color: rgba(0,0,0,0.04) !important;
+    }
+
+    /* Grid lines — barely there */
     .fc-theme-standard td, .fc-theme-standard th {
-        border-color: #f3f4f6 !important;
+        border-color: rgba(0,0,0,0.07) !important;
     }
-    /* Remove yellow today highlight */
+    .fc-theme-standard .fc-scrollgrid {
+        border-color: rgba(0,0,0,0.1) !important;
+    }
+
+    /* Today column — Apple blue whisper */
     .fc .fc-timegrid-col.fc-day-today,
     .fc .fc-daygrid-day.fc-day-today {
-        background: rgba(0, 132, 210, 0.04) !important;
+        background: rgba(0,122,255,0.05) !important;
     }
+
+    /* Now indicator — Apple red */
+    .fc .fc-timegrid-now-indicator-line {
+        border-color: #FF3B30 !important;
+        border-width: 2px !important;
+    }
+    .fc .fc-timegrid-now-indicator-arrow {
+        border-top-color: #FF3B30 !important;
+        border-bottom-color: #FF3B30 !important;
+    }
+
     /* Day numbers in month view */
     .fc .fc-daygrid-day-number {
-        font-size: 0.8125rem;
-        font-weight: 500;
-        color: #374151;
+        font-size: 0.8125rem !important;
+        font-weight: 400 !important;
+        color: #1C1C1E !important;
         text-decoration: none !important;
     }
     .fc .fc-daygrid-day.fc-day-today .fc-daygrid-day-number {
-        background: #0084d2;
+        background: #007AFF;
         color: #fff;
         border-radius: 50%;
-        width: 1.5rem;
-        height: 1.5rem;
+        width: 1.625rem;
+        height: 1.625rem;
         display: flex;
         align-items: center;
         justify-content: center;
+        font-weight: 600;
     }
-    /* "Non assegnato" column header — muted style when visible */
-    .fc-col-header-cell[data-resource-id="unassigned"] {
-        background-color: #f3f4f6;
-        color: #9ca3af;
-        font-style: italic;
+
+    /* Toolbar title */
+    .fc .fc-toolbar-title {
+        font-size: 1.0625rem !important;
+        font-weight: 600 !important;
+        color: #1C1C1E !important;
+        letter-spacing: -0.02em !important;
+    }
+
+    /* "Non assegnato" — hatched, clearly different */
+    .fc-col-header-cell[data-resource-id="unassigned"] .fc-col-header-cell-cushion {
+        color: #8E8E93 !important;
+        font-weight: 400 !important;
+        font-style: italic !important;
     }
     .fc-timegrid-col[data-resource-id="unassigned"] {
-        background-color: #fafafa;
+        background: repeating-linear-gradient(
+            -45deg,
+            #FAFAFA 0px, #FAFAFA 5px,
+            #F2F2F7 5px, #F2F2F7 10px
+        ) !important;
     }
+
+    /* Resource area label column */
+    .fc-resource-area .fc-scroller { background: #fff; }
+    .fc .fc-resource-area-header { background: #fff !important; }
+
+    /* List view */
+    .fc .fc-list-event:hover td { background: #F2F2F7 !important; }
+    .fc .fc-list-day-cushion { background: #F2F2F7 !important; font-size: 0.8125rem; }
+    .fc .fc-list-event-dot { border-color: transparent !important; }
 </style>
 {% endblock %}
