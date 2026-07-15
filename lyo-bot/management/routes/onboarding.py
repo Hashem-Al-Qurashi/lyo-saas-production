@@ -20,30 +20,53 @@ def _get_user(request: Request):
     return decode_token(token)
 
 
-async def _exchange_token(short_token: str) -> str:
-    """Exchange a short-lived user token for a long-lived token. Returns original on failure."""
+async def _exchange_code(auth_code: str) -> str:
+    """Exchange Embedded Signup auth code for a long-lived user access token.
+
+    Embedded Signup with response_type='code' returns an auth CODE (not a token).
+    Step 1: code → short-lived user token via /oauth/access_token?code=...
+    Step 2: short-lived token → long-lived token via grant_type=fb_exchange_token
+    Returns original code on failure (backend will reject it, but at least logs why).
+    """
     if not settings.meta_app_id or not settings.meta_app_secret:
         logger.warning("META_APP_ID / META_APP_SECRET not configured — skipping token exchange")
-        return short_token
+        return auth_code
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
+            # Step 1: auth code → short-lived user access token
+            r1 = await client.get(
+                "https://graph.facebook.com/oauth/access_token",
+                params={
+                    "client_id": settings.meta_app_id,
+                    "client_secret": settings.meta_app_secret,
+                    "code": auth_code,
+                },
+            )
+            d1 = r1.json()
+            user_token = d1.get("access_token")
+            if not user_token:
+                logger.error("Code→token exchange failed: %s", d1)
+                return auth_code
+
+            # Step 2: short-lived user token → long-lived token (60-day)
+            r2 = await client.get(
                 "https://graph.facebook.com/oauth/access_token",
                 params={
                     "grant_type": "fb_exchange_token",
                     "client_id": settings.meta_app_id,
                     "client_secret": settings.meta_app_secret,
-                    "fb_exchange_token": short_token,
+                    "fb_exchange_token": user_token,
                 },
             )
-            data = resp.json()
-            long_token = data.get("access_token")
+            d2 = r2.json()
+            long_token = d2.get("access_token")
             if long_token:
                 return long_token
-            logger.error("Token exchange failed: %s", data)
+            logger.error("Long-lived token exchange failed: %s", d2)
+            return user_token  # at minimum save the short-lived token
     except Exception:
         logger.exception("Token exchange error")
-    return short_token
+    return auth_code
 
 
 async def _subscribe_waba(waba_id: str, access_token: str) -> None:
@@ -85,8 +108,8 @@ async def whatsapp_callback(request: Request):
     if not access_token or not isinstance(access_token, str):
         return JSONResponse({"error": "access_token required"}, status_code=400)
 
-    # Exchange short-lived → long-lived token
-    long_token = await _exchange_token(access_token)
+    # Exchange auth code → long-lived user access token (2-step)
+    long_token = await _exchange_code(access_token)
 
     # Subscribe WABA so Meta sends webhooks to Lyo
     await _subscribe_waba(waba_id, long_token)

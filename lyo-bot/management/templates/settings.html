@@ -129,24 +129,36 @@ window.fbAsyncInit = function() {
     fjs.parentNode.insertBefore(js, fjs);
 }(document, 'script', 'facebook-jssdk'));
 
-// Listen for Embedded Signup events (phone_number_id, waba_id come via postMessage)
-var _waPhoneNumberId = null;
-var _waWabaId = null;
-window.addEventListener('message', function(event) {
-    if (event.origin !== 'https://www.facebook.com') return;
-    try {
-        var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
-        if (data.type === 'WA_EMBEDDED_SIGNUP' && data.event === 'FINISH') {
-            _waPhoneNumberId = data.data && data.data.phone_number_id;
-            _waWabaId = data.data && data.data.waba_id;
-        }
-    } catch(e) {}
-});
-
 document.getElementById('wa-connect-btn').addEventListener('click', function() {
     var btn = this;
     btn.disabled = true;
     btn.textContent = 'Connessione…';
+
+    // Promise that resolves once Meta's popup sends phone_number_id + waba_id via postMessage.
+    // FB.login callback fires synchronously after popup closes; postMessage arrives later in the
+    // event queue. We must wait for it before POSTing, otherwise we'd send empty strings to DB.
+    // Timeout after 10s: if user cancels mid-flow and FINISH never fires, re-enable the button.
+    var waDataPromise = new Promise(function(resolve, reject) {
+        var timer = setTimeout(function() {
+            window.removeEventListener('message', handler);
+            reject(new Error('timeout'));
+        }, 10000);
+        function handler(event) {
+            if (event.origin !== 'https://www.facebook.com') return;
+            try {
+                var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+                if (data.type === 'WA_EMBEDDED_SIGNUP' && data.event === 'FINISH') {
+                    clearTimeout(timer);
+                    window.removeEventListener('message', handler);
+                    resolve({
+                        phone_number_id: (data.data && data.data.phone_number_id) || '',
+                        waba_id: (data.data && data.data.waba_id) || '',
+                    });
+                }
+            } catch(e) {}
+        }
+        window.addEventListener('message', handler);
+    });
 
     FB.login(function(response) {
         if (!response.authResponse) {
@@ -161,19 +173,21 @@ document.getElementById('wa-connect-btn').addEventListener('click', function() {
         var csrfToken = document.querySelector('meta[name="csrf-token"]');
         csrfToken = csrfToken ? csrfToken.getAttribute('content') : '';
 
-        fetch('/manage/api/whatsapp/callback', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': csrfToken,
-            },
-            body: JSON.stringify({
-                phone_number_id: _waPhoneNumberId || '',
-                waba_id: _waWabaId || '',
-                access_token: token,
-            }),
+        waDataPromise.then(function(waData) {
+            return fetch('/manage/api/whatsapp/callback', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken,
+                },
+                body: JSON.stringify({
+                    phone_number_id: waData.phone_number_id,
+                    waba_id: waData.waba_id,
+                    access_token: token,
+                }),
+            });
         })
-        .then(r => r.json())
+        .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.status === 'connected') {
                 document.getElementById('wa-status').innerHTML =
@@ -189,9 +203,11 @@ document.getElementById('wa-connect-btn').addEventListener('click', function() {
                 btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg> Collega WhatsApp';
             }
         })
-        .catch(function() {
-            if (typeof showToast === 'function') showToast('Errore di rete, riprova.', 'error');
+        .catch(function(err) {
+            var msg = (err && err.message === 'timeout') ? 'Connessione annullata.' : 'Errore di rete, riprova.';
+            if (typeof showToast === 'function') showToast(msg, 'error');
             btn.disabled = false;
+            btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg> Collega WhatsApp';
         });
     }, {
         scope: 'whatsapp_business_management,whatsapp_business_messaging',
