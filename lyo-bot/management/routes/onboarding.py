@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta, timezone
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -114,6 +115,9 @@ async def whatsapp_callback(request: Request):
     # Subscribe WABA so Meta sends webhooks to Lyo
     await _subscribe_waba(waba_id, long_token)
 
+    # 60-day long-lived token — record expiry so we can warn before it lapses
+    token_expires_at = datetime.now(timezone.utc) + timedelta(days=60)
+
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -121,9 +125,10 @@ async def whatsapp_callback(request: Request):
                SET whatsapp_phone_number_id = %s,
                    waba_id = %s,
                    meta_access_token = %s,
+                   meta_token_expires_at = %s,
                    updated_at = NOW()
                WHERE id = %s""",
-            (phone_number_id, waba_id, long_token, user["business_id"]),
+            (phone_number_id, waba_id, long_token, token_expires_at, user["business_id"]),
         )
         if cur.rowcount == 0:
             return JSONResponse({"error": "business not found"}, status_code=404)
@@ -142,10 +147,45 @@ async def whatsapp_status(request: Request):
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT whatsapp_phone_number_id FROM businesses WHERE id = %s",
+            "SELECT whatsapp_phone_number_id, meta_token_expires_at FROM businesses WHERE id = %s",
             (user["business_id"],),
         )
         row = cur.fetchone()
 
     connected = bool(row and row[0])
-    return JSONResponse({"connected": connected, "phone_number_id": row[0] if connected else None})
+    expires_at = row[1].isoformat() if (row and row[1]) else None
+    days_until_expiry = None
+    if row and row[1]:
+        delta = row[1].replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)
+        days_until_expiry = max(0, delta.days)
+
+    return JSONResponse({
+        "connected": connected,
+        "phone_number_id": row[0] if connected else None,
+        "token_expires_at": expires_at,
+        "days_until_expiry": days_until_expiry,
+    })
+
+
+@router.post("/manage/api/whatsapp/disconnect")
+async def whatsapp_disconnect(request: Request):
+    """Clear WhatsApp credentials — tenant must reconnect via Embedded Signup."""
+    user = _get_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """UPDATE businesses
+               SET whatsapp_phone_number_id = NULL,
+                   waba_id = NULL,
+                   meta_access_token = NULL,
+                   meta_token_expires_at = NULL,
+                   updated_at = NOW()
+               WHERE id = %s""",
+            (user["business_id"],),
+        )
+
+    logger.info("WhatsApp disconnected for business %s", user["business_id"])
+    return JSONResponse({"status": "disconnected"})

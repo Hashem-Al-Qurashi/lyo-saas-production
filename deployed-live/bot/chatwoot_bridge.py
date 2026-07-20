@@ -168,10 +168,12 @@ def _find_or_create_conversation(contact_id: int, phone_e164: str) -> Optional[i
     return None
 
 
-def push_incoming(phone: str, content: str, name: Optional[str] = None) -> None:
+def push_incoming(phone: str, content: str, name: Optional[str] = None, business: dict = None) -> None:
     """Customer (WhatsApp) message → Chatwoot inbox as 'incoming'."""
     if not is_enabled() or not content:
         return
+    if business and not business.get("chatwoot_account_id"):
+        return  # non-Chatwoot tenant — skip bridge
     try:
         phone_e164 = _normalize_phone(phone)
         contact_id = _find_or_create_contact(phone_e164, name)
@@ -190,10 +192,12 @@ def push_incoming(phone: str, content: str, name: Optional[str] = None) -> None:
         logger.warning(f"push_incoming failed: {e}")
 
 
-def push_outgoing(phone: str, content: str) -> None:
+def push_outgoing(phone: str, content: str, business: dict = None) -> None:
     """Bot reply → Chatwoot inbox as 'outgoing' (so it appears in the conversation)."""
     if not is_enabled() or not content:
         return
+    if business and not business.get("chatwoot_account_id"):
+        return  # non-Chatwoot tenant — skip bridge
     try:
         phone_e164 = _normalize_phone(phone)
         contact_id = _find_or_create_contact(phone_e164, None)

@@ -101,17 +101,37 @@
 
 <script>
 // ── WhatsApp status check ──────────────────────────────────────────────────
+var _waStatusCsrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
 fetch('/manage/api/whatsapp/status')
     .then(r => r.json())
     .then(data => {
-        if (data.connected) {
-            document.getElementById('wa-status').innerHTML =
-                '<div class="flex items-center gap-3 bg-green-50 border border-green-200 px-4 py-3 rounded-xl">' +
-                '<svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
-                '<div><p class="text-green-700 font-medium text-sm">WhatsApp collegato</p>' +
-                '<p class="text-green-600 text-xs">Numero ID: ' + data.phone_number_id + '</p></div>' +
-                '</div>';
-        }
+        if (!data.connected) return;
+        var expiring = data.days_until_expiry !== null && data.days_until_expiry < 7;
+        var expiryBadge = expiring
+            ? '<div class="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg">' +
+              '<svg class="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
+              '<p class="text-amber-700 text-xs font-medium">Token scade in ' + data.days_until_expiry + ' giorni — riconnetti WhatsApp.</p></div>'
+            : '';
+        document.getElementById('wa-status').innerHTML =
+            '<div class="bg-green-50 border border-green-200 px-4 py-3 rounded-xl">' +
+            '<div class="flex items-center gap-3">' +
+            '<svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+            '<div class="flex-1">' +
+            '<p class="text-green-700 font-medium text-sm">WhatsApp collegato</p>' +
+            '<p class="text-green-600 text-xs">Numero ID: ' + data.phone_number_id + '</p>' +
+            '</div>' +
+            '<button id="wa-disconnect-btn" class="text-xs text-red-500 hover:text-red-700 font-medium underline">Disconnetti</button>' +
+            '</div>' +
+            expiryBadge +
+            '</div>';
+        document.getElementById('wa-disconnect-btn').addEventListener('click', function() {
+            if (!confirm('Disconnettere WhatsApp? Il bot smetterà di rispondere finché non riconnetti.')) return;
+            fetch('/manage/api/whatsapp/disconnect', {
+                method: 'POST',
+                headers: {'X-CSRF-Token': _waStatusCsrf},
+            }).then(function() { location.reload(); });
+        });
     })
     .catch(() => {});
 
