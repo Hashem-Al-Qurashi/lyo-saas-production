@@ -2027,12 +2027,33 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
         try:
             cur = conn.cursor()
             if business_id is not None:
+                # Helper: is this day of week a working day for an operator?
+                def _op_works_on_date(op_obj: dict, check_date: str) -> bool:
+                    from datetime import datetime as _dt_w
+                    _dow = _dt_w.strptime(check_date, "%Y-%m-%d").weekday()
+                    _h = op_obj.get("hours", {}).get(_dow)
+                    if _h is None:
+                        return True  # no schedule data → assume working
+                    return bool(_h.get("is_working", True))
+
                 if operator_name and operators:
                     # Specific operator: check per-operator
                     op_result = resolve_operator(operator_name, "", operators)
                     if not op_result["success"]:
                         return {"success": False, **op_result}
                     op_id = op_result["operator_id"]
+                    # Check operator working day BEFORE querying DB
+                    _op_obj = next((o for o in operators if o["id"] == op_id), None)
+                    if _op_obj and not _op_works_on_date(_op_obj, date):
+                        return {
+                            "success": True,
+                            "available": False,
+                            "date": date,
+                            "time": time,
+                            "reason": "operator_day_off",
+                            "operator": _op_obj["display_name"],
+                            "message": f"{_op_obj['display_name']} non lavora quel giorno.",
+                        }
                     # Bug #4: interval overlap, not exact-time match
                     cur.execute(
                         """SELECT COUNT(*) FROM appointments
@@ -2045,20 +2066,32 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
                     count = cur.fetchone()[0]
                     available = count == 0
                 elif operators and not operator_name:
-                    # No preference + operators exist: available if not ALL operators booked
+                    # No preference: only consider operators who work that day
+                    _working_ops = [op for op in operators if _op_works_on_date(op, date)]
+                    if not _working_ops:
+                        return {
+                            "success": True,
+                            "available": False,
+                            "date": date,
+                            "time": time,
+                            "reason": "no_operators_working",
+                            "message": "Nessun operatore è disponibile in quella giornata.",
+                        }
                     # Bug #4: count operators with overlapping appts
+                    _working_op_ids = [op["id"] for op in _working_ops]
                     cur.execute(
                         """SELECT COUNT(DISTINCT operator_id) FROM appointments
-                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                           WHERE business_id = %s AND operator_id = ANY(%s)
+                                 AND appointment_date = %s AND status = 'confirmed'
                                  AND appointment_time < (%s::time + (%s || ' minutes')::interval)
                                  AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
-                        (business_id, date, time, _req_duration, time)
+                        (business_id, _working_op_ids, date, time, _req_duration, time)
                     )
                     booked_count = cur.fetchone()[0]
-                    available = booked_count < len(operators)
+                    available = booked_count < len(_working_ops)
                     _no_pref_operator = None
                     if available:
-                        _op_ids = [op["id"] for op in operators]
+                        _op_ids = _working_op_ids
                         # Bug #4: NOT EXISTS interval overlap
                         cur.execute(
                             """SELECT o.id, o.display_name FROM operators o
