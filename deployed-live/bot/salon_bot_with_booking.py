@@ -1882,12 +1882,27 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                             if main_op:
                                 logger.info(f"🔍 Main op {main_op['display_name']} treatments: {main_op.get('treatments', [])}, addon_code='{addon['code']}', match={addon['code'] in main_op.get('treatments', [])}")
                             if main_op and addon["code"] not in main_op.get("treatments", []):
-                                # Main operator can't do addon — find one who can and is free
+                                # Main operator can't do addon — find one who can AND is free at addon_time
+                                cur_check = conn.cursor()
+                                found_op_id = None
+                                found_op_name = None
                                 for op in addon_operators:
                                     if addon["code"] in op.get("treatments", []):
-                                        addon_op_id = op["id"]
-                                        addon_op_name = op["display_name"]
-                                        break
+                                        cur_check.execute(
+                                            """SELECT 1 FROM appointments
+                                               WHERE operator_id=%s AND appointment_date=%s
+                                               AND appointment_time=%s AND status='confirmed'""",
+                                            (op["id"], date, addon_time),
+                                        )
+                                        if not cur_check.fetchone():
+                                            found_op_id = op["id"]
+                                            found_op_name = op["display_name"]
+                                            break
+                                if not found_op_id:
+                                    logger.warning(f"⚠️ No free operator for addon '{addon['code']}' at {addon_time} — skipping addon")
+                                    raise Exception(f"no_free_addon_operator at {addon_time}")
+                                addon_op_id = found_op_id
+                                addon_op_name = found_op_name
                         addon_event_id = create_calendar_event(
                             customer_name=customer_name, service=addon_service,
                             date_str=date, time_str=addon_time,

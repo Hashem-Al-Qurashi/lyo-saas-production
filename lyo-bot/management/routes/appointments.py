@@ -101,6 +101,11 @@ async def cancel_appointment(request: Request, appointment_id: int):
                WHERE id = %s AND business_id = %s AND status = 'confirmed'""",
             (appointment_id, user["business_id"]),
         )
+        cur.execute(
+            """UPDATE appointments SET status = 'cancelled', updated_at = NOW()
+               WHERE parent_appointment_id = %s AND business_id = %s AND status = 'confirmed'""",
+            (appointment_id, user["business_id"]),
+        )
 
     return RedirectResponse(url="/manage/appointments/", status_code=302)
 
