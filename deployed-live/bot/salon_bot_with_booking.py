@@ -1010,24 +1010,42 @@ def get_tomorrow_appointments(business_id: int = None) -> List[Dict]:
         return []
 
 
-def get_unconfirmed_appointments() -> List[Dict]:
-    """Get appointments where reminder was sent but not confirmed"""
+def get_unconfirmed_appointments(business_id: int = None) -> List[Dict]:
+    """Get tomorrow's appointments where reminder was sent but not confirmed.
+
+    When business_id is given, queries the multi-tenant `appointments` table.
+    Excludes auto-addon children (parent reminder covers them).
+    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
         tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        cur.execute("""
-            SELECT id, customer_phone, customer_name, service_type,
-                   appointment_date, appointment_time, price
-            FROM salon_appointments
-            WHERE appointment_date = %s
-              AND status = 'confirmed'
-              AND reminder_sent_at IS NOT NULL
-              AND reminder_confirmed = FALSE
-            ORDER BY appointment_time
-        """, (tomorrow,))
+        if business_id is not None:
+            cur.execute("""
+                SELECT id, customer_phone, customer_name, treatment_name,
+                       appointment_date, appointment_time, price
+                FROM appointments
+                WHERE business_id = %s
+                  AND appointment_date = %s
+                  AND status = 'confirmed'
+                  AND reminder_sent_at IS NOT NULL
+                  AND reminder_confirmed = FALSE
+                  AND COALESCE(is_auto_addon, FALSE) = FALSE
+                ORDER BY appointment_time
+            """, (business_id, tomorrow))
+        else:
+            cur.execute("""
+                SELECT id, customer_phone, customer_name, service_type,
+                       appointment_date, appointment_time, price
+                FROM salon_appointments
+                WHERE appointment_date = %s
+                  AND status = 'confirmed'
+                  AND reminder_sent_at IS NOT NULL
+                  AND reminder_confirmed = FALSE
+                ORDER BY appointment_time
+            """, (tomorrow,))
 
         appointments = []
         for row in cur.fetchall():
@@ -1291,43 +1309,68 @@ Grazie!"""
 
 
 async def check_unconfirmed_and_notify():
-    """Disabled per Bug #16 — unconfirmed appointment emails turned off."""
-    logger.info("📧 check_unconfirmed_and_notify: disabled (Bug #16), skipping.")
-    return
+    """Email salon owners about tomorrow's unconfirmed appointments (runs at 18:00)."""
+    logger.info("📧 check_unconfirmed_and_notify: starting...")
 
-    unconfirmed = get_unconfirmed_appointments()
-    logger.info(f"📋 Found {len(unconfirmed)} unconfirmed appointments")
-
-    if not unconfirmed:
-        logger.info("✅ All appointments confirmed! No email needed.")
-        return
-
-    # Build email body
     tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%d/%m/%Y")
 
+    # Load all active businesses
+    businesses = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, name, owner_email FROM businesses WHERE status = 'active'"""
+        )
+        businesses = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ check_unconfirmed_and_notify: failed to load businesses: {e}")
+
+    if not businesses:
+        # Legacy single-tenant fallback
+        unconfirmed = get_unconfirmed_appointments()
+        logger.info(f"📋 Found {len(unconfirmed)} unconfirmed appointments (legacy)")
+        if not unconfirmed:
+            logger.info("✅ All appointments confirmed (legacy). No email needed.")
+            return
+        _send_unconfirmed_email(unconfirmed, OWNER_EMAIL, tomorrow, "Aura Hair Studio")
+        return
+
+    for biz_id, biz_name, biz_owner_email in businesses:
+        unconfirmed = get_unconfirmed_appointments(business_id=biz_id)
+        logger.info(f"📋 [{biz_name}] Found {len(unconfirmed)} unconfirmed appointments")
+        if not unconfirmed:
+            logger.info(f"✅ [{biz_name}] All confirmed. No email needed.")
+            continue
+        recipient = biz_owner_email or OWNER_EMAIL
+        _send_unconfirmed_email(unconfirmed, recipient, tomorrow, biz_name)
+
+
+def _send_unconfirmed_email(unconfirmed: List[Dict], recipient: str, tomorrow_label: str, salon_name: str):
+    """Build and send the unconfirmed-appointments email to the salon owner."""
     email_body = f"""Ciao,
 
-I seguenti appuntamenti per domani ({tomorrow}) NON sono stati confermati:
+I seguenti appuntamenti per domani ({tomorrow_label}) NON sono stati confermati:
 
 """
     for apt in unconfirmed:
         time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
         email_body += f"• {apt['name']} - {apt['service']} alle {time_str} (Tel: {apt['phone']})\n"
 
-    email_body += """
+    email_body += f"""
 Puoi decidere se mantenerli o cancellarli.
 
 Saluti,
-Sistema Aura Hair Studio"""
+Sistema {salon_name}"""
 
-    # Send email
-    subject = f"⚠️ Appuntamenti non confermati per domani ({tomorrow})"
-    success = send_email(OWNER_EMAIL, subject, email_body)
-
+    subject = f"⚠️ Appuntamenti non confermati per domani ({tomorrow_label})"
+    success = send_email(recipient, subject, email_body)
     if success:
-        logger.info(f"✅ Unconfirmed appointments email sent to {OWNER_EMAIL}")
+        logger.info(f"✅ Unconfirmed appointments email sent to {recipient}")
     else:
-        logger.error(f"❌ Failed to send unconfirmed appointments email")
+        logger.error(f"❌ Failed to send unconfirmed appointments email to {recipient}")
 
 
 # Scheduler instance
@@ -1930,6 +1973,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                         result["auto_addon"] = {
                             "appointment_id": addon_appt_id,
                             "service": addon["name_it"],
+                            "operator_name": addon_op_name,
                             "time": addon_time,
                             "duration": addon["duration"],
                             "price": addon["price"],
