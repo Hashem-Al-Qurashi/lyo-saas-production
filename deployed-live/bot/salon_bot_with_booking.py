@@ -1651,7 +1651,7 @@ def _get_slots_for_date(date_str: str, biz_context: dict = None, parsed_date=Non
 
 def create_appointment(customer_phone: str, customer_name: str, service_type: str, date: str, time: str,
                        platform: str = "whatsapp", business_id: int = None, biz_context: dict = None,
-                       operator_name: str = None) -> Dict[str, Any]:
+                       operator_name: str = None, addon_operator_name: str = None) -> Dict[str, Any]:
     """Create a salon appointment"""
     try:
         # Normalize phone
@@ -1925,11 +1925,24 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                             if main_op:
                                 logger.info(f"🔍 Main op {main_op['display_name']} treatments: {main_op.get('treatments', [])}, addon_code='{addon['code']}', match={addon['code'] in main_op.get('treatments', [])}")
                             if main_op and addon["code"] not in main_op.get("treatments", []):
-                                # Main operator can't do addon — find one who can AND is free at addon_time
+                                # Main operator can't do addon — find one who can AND is free at addon_time.
+                                # Honor addon_operator_name preference if provided by the LLM.
                                 cur_check = conn.cursor()
                                 found_op_id = None
                                 found_op_name = None
-                                for op in addon_operators:
+
+                                # Build candidate list: if customer specified an addon operator,
+                                # try that one first, then fall back to sort_order.
+                                preferred_name = (addon_operator_name or "").lower().strip()
+                                if preferred_name:
+                                    sorted_ops = sorted(
+                                        addon_operators,
+                                        key=lambda op: (0 if op["display_name"].lower() == preferred_name else 1)
+                                    )
+                                else:
+                                    sorted_ops = addon_operators
+
+                                for op in sorted_ops:
                                     if addon["code"] in op.get("treatments", []):
                                         cur_check.execute(
                                             """SELECT 1 FROM appointments
@@ -3059,7 +3072,8 @@ def execute_function(function_name: str, arguments: str, phone: str,
                 platform=platform,
                 business_id=business_id,
                 biz_context=biz_context,
-                operator_name=args.get("operator_name")
+                operator_name=args.get("operator_name"),
+                addon_operator_name=args.get("addon_operator_name")
             )
 
         elif function_name == "check_availability":

@@ -680,6 +680,12 @@ TOOLS:
    - confirm_reminder: Customer confirms tomorrow's appointment
    - escalate_to_human: Customer is angry/frustrated
 
+CANCELLATION RULE (CRITICAL):
+   After a successful cancel_appointment call, treat that slot as COMPLETELY FREE.
+   NEVER say "hai già un appuntamento" for a slot you just cancelled.
+   If the customer then asks to book the same slot, check availability fresh — do NOT
+   assume it is still occupied.
+
 RULES:
    - Only help with salon-related topics
    - Never reveal you are AI/bot
@@ -909,9 +915,19 @@ def build_booking_tools(services: dict, operators: list = None) -> list:
         create_props["operator_name"] = {
             "type": ["string", "null"],
             "enum": operator_names + [None],
-            "description": "Stylist name, or null for auto-assignment",
+            "description": "Stylist name for the MAIN service, or null for auto-assignment",
         }
         create_required.append("operator_name")
+        create_props["addon_operator_name"] = {
+            "type": ["string", "null"],
+            "enum": operator_names + [None],
+            "description": (
+                "Stylist name for the AUTO-ADDON service (e.g. piega after taglio/balayage), "
+                "if the customer explicitly requested a specific stylist for it. "
+                "Pass null to auto-assign the addon operator."
+            ),
+        }
+        create_required.append("addon_operator_name")
 
     # Build check_availability properties
     check_props = {
