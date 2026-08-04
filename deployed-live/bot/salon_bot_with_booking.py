@@ -2151,19 +2151,38 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
                         }
                     # Bug #4: count operators with overlapping appts
                     _working_op_ids = [op["id"] for op in _working_ops]
+                    # Bug #G: only consider operators who can perform the requested service
+                    if treatment_code:
+                        _eligible_ops = [
+                            op for op in _working_ops
+                            if not op.get("treatments") or treatment_code in op.get("treatments", [])
+                        ]
+                        if not _eligible_ops:
+                            return {
+                                "success": True,
+                                "available": False,
+                                "date": date,
+                                "time": time,
+                                "reason": "no_operator_for_service",
+                                "message": "Nessun operatore disponibile per questo servizio in quella data.",
+                            }
+                        _eligible_ids = [op["id"] for op in _eligible_ops]
+                    else:
+                        _eligible_ops = _working_ops
+                        _eligible_ids = _working_op_ids
                     cur.execute(
                         """SELECT COUNT(DISTINCT operator_id) FROM appointments
                            WHERE business_id = %s AND operator_id = ANY(%s)
                                  AND appointment_date = %s AND status = 'confirmed'
                                  AND appointment_time < (%s::time + (%s || ' minutes')::interval)
                                  AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
-                        (business_id, _working_op_ids, date, time, _req_duration, time)
+                        (business_id, _eligible_ids, date, time, _req_duration, time)
                     )
                     booked_count = cur.fetchone()[0]
-                    available = booked_count < len(_working_ops)
+                    available = booked_count < len(_eligible_ops)
                     _no_pref_operator = None
                     if available:
-                        _op_ids = _working_op_ids
+                        _op_ids = _eligible_ids
                         # Bug #4: NOT EXISTS interval overlap
                         cur.execute(
                             """SELECT o.id, o.display_name FROM operators o
