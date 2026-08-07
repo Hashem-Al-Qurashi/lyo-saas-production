@@ -401,13 +401,17 @@
             var opId = resources.length > 0 ? String(resources[0].id) : null;
             var col = (opId && OPERATOR_COLOR_MAP[opId]) ? OPERATOR_COLOR_MAP[opId] : '#007AFF';
             // Apple Calendar style: light pastel fill + left accent strip + colored text
-            info.el.style.backgroundColor = hexToRgba(col, 0.13);
+            info.el.style.backgroundColor = hexToRgba(col, 0.15);
             info.el.style.borderStyle = 'solid';
             info.el.style.borderWidth = '0 0 0 3px';
             info.el.style.borderColor = col;
             info.el.style.borderRadius = '0 4px 4px 0';
             info.el.style.color = col;
-            info.el.style.boxShadow = 'none';
+            // White outline separates adjacent overlapping events
+            info.el.style.boxShadow = 'inset 0 0 0 1px rgba(255,255,255,0.6)';
+            // FC's .fc-event-main is styled white internally — force color on inner elements
+            var innerEls = info.el.querySelectorAll('.fc-event-main, .fc-event-title, .fc-event-time');
+            innerEls.forEach(function(el) { el.style.color = col; });
         },
 
         datesSet: function() {
