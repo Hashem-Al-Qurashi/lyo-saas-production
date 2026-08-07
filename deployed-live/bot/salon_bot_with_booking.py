@@ -39,6 +39,7 @@ from business_context import (
     lookup_treatment, lookup_business_policy, lookup_closure_dates,
     lookup_faq, lookup_operator_for_treatment, get_available_treatments,
     load_business_by_phone_number_id,
+    load_business_by_instagram_page_id,
     load_services,
     load_business_hours,
     load_closures,
@@ -3649,16 +3650,23 @@ def split_message(message: str, max_length: int = 1000) -> List[str]:
     return chunks
 
 
-async def send_instagram_message(recipient_id: str, message: str) -> bool:
-    """Send Instagram DM via Graph API"""
-    if not INSTAGRAM_ACCESS_TOKEN:
+async def send_instagram_message(recipient_id: str, message: str, business: dict = None) -> bool:
+    """Send Instagram DM via Graph API — uses per-business token when available."""
+    token = (business or {}).get("instagram_access_token") or INSTAGRAM_ACCESS_TOKEN
+    ig_page_id = (business or {}).get("instagram_page_id") or INSTAGRAM_PAGE_ID
+
+    if not token:
         logger.error("[IG] No access token configured")
         return False
 
-    url = "https://graph.instagram.com/v21.0/me/messages"
+    # Use Graph API with explicit page ID for multi-tenant; fall back to /me for single-tenant
+    if ig_page_id:
+        url = f"https://graph.facebook.com/v21.0/{ig_page_id}/messages"
+    else:
+        url = "https://graph.instagram.com/v21.0/me/messages"
 
     headers = {
-        "Authorization": f"Bearer {INSTAGRAM_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
@@ -3689,9 +3697,10 @@ async def send_instagram_message(recipient_id: str, message: str) -> bool:
     return success
 
 
-# Instagram message buffering (separate from WhatsApp, keyed by Instagram user IDs)
+# Instagram message buffering — keyed by Instagram user ID, stores biz_context alongside messages
 ig_pending_messages: Dict[str, List[Dict]] = {}
 ig_pending_timers: Dict[str, asyncio.Task] = {}
+ig_pending_biz_context: Dict[str, dict] = {}  # user_id → biz_context for buffered messages
 
 
 async def ig_process_buffered_messages(user_id: str):
@@ -3699,26 +3708,30 @@ async def ig_process_buffered_messages(user_id: str):
     try:
         messages = ig_pending_messages.pop(user_id, [])
         ig_pending_timers.pop(user_id, None)
+        biz_context = ig_pending_biz_context.pop(user_id, None)
 
         if not messages:
             return
 
+        business = (biz_context or {}).get("business", {})
+        biz_id = business.get("id")
         username = messages[0].get("username", "Cliente")
         combined_text = "\n".join(msg["text"] for msg in messages) if len(messages) > 1 else messages[0]["text"]
 
         logger.info(f"[IG] Timer fired for {user_id}. Processing {len(messages)} buffered message(s)")
 
-        response = get_ai_response(user_id, combined_text, platform="instagram")
-        save_conversation_to_db(user_id, username, combined_text, response, platform="instagram")
-        await send_instagram_message(user_id, response)
+        response = get_ai_response(user_id, combined_text, business_id=biz_id, biz_context=biz_context)
+        save_conversation_to_db(user_id, username, combined_text, response, business_id=biz_id, platform="instagram")
+        await send_instagram_message(user_id, response, business)
 
     except Exception as e:
         logger.error(f"[IG] Error processing buffered messages for {user_id}: {e}")
         ig_pending_messages.pop(user_id, None)
         ig_pending_timers.pop(user_id, None)
+        ig_pending_biz_context.pop(user_id, None)
 
 
-async def ig_handle_buffered_message(user_id: str, text: str, username: str):
+async def ig_handle_buffered_message(user_id: str, text: str, username: str, biz_context: dict = None):
     """Handle incoming Instagram message with batching"""
     if user_id not in ig_pending_messages:
         ig_pending_messages[user_id] = []
@@ -3728,6 +3741,10 @@ async def ig_handle_buffered_message(user_id: str, text: str, username: str):
         "username": username,
         "timestamp": datetime.now(ITALY_TZ).isoformat()
     })
+    # Always update biz_context so the last known context is used when timer fires
+    if biz_context:
+        ig_pending_biz_context[user_id] = biz_context
+
     logger.info(f"[IG] Buffered message for {user_id}. Buffer size: {len(ig_pending_messages[user_id])}")
 
     if user_id in ig_pending_timers:
@@ -3744,15 +3761,19 @@ async def ig_handle_buffered_message(user_id: str, text: str, username: str):
     logger.info(f"[IG] Started {MESSAGE_BATCH_DELAY_SECONDS}s timer for {user_id}")
 
 
-async def process_instagram_event(event: Dict[str, Any]):
-    """Process an Instagram messaging event"""
+async def process_instagram_event(event: Dict[str, Any], biz_context: dict = None):
+    """Process an Instagram messaging event — uses booking engine via biz_context."""
     try:
         sender_id = event.get("sender", {}).get("id")
         if not sender_id:
             return
 
-        # Ignore messages from ourselves (echo)
-        if sender_id == INSTAGRAM_PAGE_ID:
+        business = (biz_context or {}).get("business", {})
+        biz_id = business.get("id")
+        ig_page_id = business.get("instagram_page_id") or INSTAGRAM_PAGE_ID
+
+        # Ignore echoes from ourselves
+        if sender_id == ig_page_id:
             return
 
         message = event.get("message", {})
@@ -3764,8 +3785,9 @@ async def process_instagram_event(event: Dict[str, Any]):
 
         message_text = message.get("text")
         username = "Cliente"
+        biz_name = business.get("name", "Unknown") if business else "Unknown"
 
-        logger.info(f"[IG] Message from {sender_id}: {message_text[:100] if message_text else '(no text)'}...")
+        logger.info(f"[IG] [{biz_name}] Message from {sender_id}: {message_text[:100] if message_text else '(no text)'}...")
 
         if sender_id in chat_blocked:
             logger.info(f"[IG] Chat blocked for {sender_id}, ignoring message")
@@ -3773,11 +3795,11 @@ async def process_instagram_event(event: Dict[str, Any]):
 
         if message_text:
             if MESSAGE_BATCHING_ENABLED:
-                await ig_handle_buffered_message(sender_id, message_text, username)
+                await ig_handle_buffered_message(sender_id, message_text, username, biz_context)
             else:
-                response = get_ai_response(sender_id, message_text)
-                save_conversation_to_db(sender_id, username, message_text, response, platform="instagram")
-                await send_instagram_message(sender_id, response)
+                response = get_ai_response(sender_id, message_text, business_id=biz_id, biz_context=biz_context)
+                save_conversation_to_db(sender_id, username, message_text, response, business_id=biz_id, platform="instagram")
+                await send_instagram_message(sender_id, response, business)
 
         elif message.get("attachments"):
             attachments = message.get("attachments", [])
@@ -3791,7 +3813,7 @@ async def process_instagram_event(event: Dict[str, Any]):
                     f"L'utente Instagram {sender_id} ha inviato un'immagine.\nRichiede attenzione manuale."
                 )
                 await send_instagram_message(sender_id,
-                    "Abbiamo ricevuto la tua immagine. Ti rispondera presto un membro del nostro team.")
+                    "Abbiamo ricevuto la tua immagine. Ti rispondera presto un membro del nostro team.", business)
 
             elif attachment_type == "video":
                 send_alert_email(
@@ -3799,7 +3821,7 @@ async def process_instagram_event(event: Dict[str, Any]):
                     f"L'utente Instagram {sender_id} ha inviato un video.\nRichiede attenzione manuale."
                 )
                 await send_instagram_message(sender_id,
-                    "Abbiamo ricevuto il tuo video. Ti rispondera presto un membro del nostro team.")
+                    "Abbiamo ricevuto il tuo video. Ti rispondera presto un membro del nostro team.", business)
 
             elif attachment_type == "audio":
                 send_alert_email(
@@ -3808,7 +3830,7 @@ async def process_instagram_event(event: Dict[str, Any]):
                 )
                 await send_instagram_message(sender_id,
                     "Al momento non possiamo ascoltare i messaggi vocali. "
-                    "Se puoi, scrivici il tuo messaggio. Altrimenti ti rispondera presto un membro del nostro team.")
+                    "Se puoi, scrivici il tuo messaggio. Altrimenti ti rispondera presto un membro del nostro team.", business)
 
             elif attachment_type in ("sticker", "like_heart"):
                 logger.info(f"[IG] Sticker/reaction from {sender_id}. Ignored.")
@@ -3819,20 +3841,20 @@ async def process_instagram_event(event: Dict[str, Any]):
                     f"L'utente Instagram {sender_id} ci ha menzionato nella sua storia."
                 )
                 await send_instagram_message(sender_id,
-                    "Grazie per averci menzionato nella tua storia! Come possiamo aiutarti?")
+                    "Grazie per averci menzionato nella tua storia! Come possiamo aiutarti?", business)
 
             elif attachment_type == "story_reply":
                 story_reply_text = message.get("reply_to", {}).get("story", {}).get("text", "")
                 if story_reply_text:
-                    response = get_ai_response(sender_id, story_reply_text)
-                    save_conversation_to_db(sender_id, username, f"[Story reply] {story_reply_text}", response, platform="instagram")
-                    await send_instagram_message(sender_id, response)
+                    response = get_ai_response(sender_id, story_reply_text, business_id=biz_id, biz_context=biz_context)
+                    save_conversation_to_db(sender_id, username, f"[Story reply] {story_reply_text}", response, business_id=biz_id, platform="instagram")
+                    await send_instagram_message(sender_id, response, business)
                 else:
                     await send_instagram_message(sender_id,
-                        "Grazie per la risposta alla nostra storia! Come possiamo aiutarti?")
+                        "Grazie per la risposta alla nostra storia! Come possiamo aiutarti?", business)
             else:
                 await send_instagram_message(sender_id,
-                    "Posso rispondere solo a messaggi di testo. Come posso aiutarti?")
+                    "Posso rispondere solo a messaggi di testo. Come posso aiutarti?", business)
 
         elif event.get("reaction"):
             logger.info(f"[IG] Reaction from {sender_id}. Ignored.")
@@ -4096,10 +4118,23 @@ async def instagram_webhook(request: Request):
             return JSONResponse({"status": "ignored"})
 
         for entry in body.get("entry", []):
-            messaging_events = entry.get("messaging", [])
+            # entry["id"] is the Instagram Business Account ID — route to the right tenant
+            ig_page_id = str(entry.get("id", ""))
+            biz_context = None
+            if ig_page_id:
+                try:
+                    business = load_business_by_instagram_page_id(ig_page_id)
+                    biz_context = {"business": business}
+                except BusinessNotFoundError:
+                    logger.warning(f"[IG] No active business for instagram_page_id={ig_page_id} — skipping entry")
+                    continue
+                except Exception as e:
+                    logger.error(f"[IG] DB lookup error for page_id={ig_page_id}: {e}")
+                    continue
 
+            messaging_events = entry.get("messaging", [])
             for event in messaging_events:
-                await process_instagram_event(event)
+                await process_instagram_event(event, biz_context)
 
         return JSONResponse({"status": "processed"})
 

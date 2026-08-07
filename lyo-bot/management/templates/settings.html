@@ -83,6 +83,18 @@
         </div>
     </div>
 
+    <!-- Instagram Connection -->
+    <div class="border-t pt-5">
+        <h2 class="text-base font-semibold text-gray-900 mb-1">Connessione Instagram</h2>
+        <p class="text-gray-500 text-sm mb-4">Collega il tuo account Instagram Professional per ricevere e rispondere ai DM.</p>
+        <div id="ig-status">
+            <button id="ig-connect-btn" type="button" class="inline-flex items-center gap-2 bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 rounded-xl hover:opacity-90 font-medium text-sm transition-opacity shadow-sm">
+                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z"/></svg>
+                Collega Instagram
+            </button>
+        </div>
+    </div>
+
     <div class="pt-2">
         <button type="submit" class="btn-primary">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
@@ -237,6 +249,119 @@ document.getElementById('wa-connect-btn').addEventListener('click', function() {
 });
 {% else %}
 document.getElementById('wa-connect-btn').addEventListener('click', function() {
+    alert('Configurazione Meta non ancora attiva. Contatta il supporto Lyo.');
+});
+{% endif %}
+
+// ── Instagram status check ─────────────────────────────────────────────────
+var _igStatusCsrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
+fetch('/manage/api/instagram/status')
+    .then(r => r.json())
+    .then(data => {
+        if (!data.connected) return;
+        var expiring = data.days_until_expiry !== null && data.days_until_expiry < 7;
+        var expiryBadge = expiring
+            ? '<div class="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg">' +
+              '<svg class="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
+              '<p class="text-amber-700 text-xs font-medium">Token scade in ' + data.days_until_expiry + ' giorni — riconnetti Instagram.</p></div>'
+            : '';
+        document.getElementById('ig-status').innerHTML =
+            '<div class="bg-purple-50 border border-purple-200 px-4 py-3 rounded-xl">' +
+            '<div class="flex items-center gap-3">' +
+            '<svg class="w-5 h-5 text-purple-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+            '<div class="flex-1">' +
+            '<p class="text-purple-700 font-medium text-sm">Instagram collegato</p>' +
+            '<p class="text-purple-600 text-xs">Page ID: ' + data.instagram_page_id + '</p>' +
+            '</div>' +
+            '<button id="ig-disconnect-btn" class="text-xs text-red-500 hover:text-red-700 font-medium underline">Disconnetti</button>' +
+            '</div>' + expiryBadge + '</div>';
+        document.getElementById('ig-disconnect-btn').addEventListener('click', function() {
+            if (!confirm('Disconnettere Instagram? Il bot smetterà di rispondere ai DM.')) return;
+            fetch('/manage/api/instagram/disconnect', {
+                method: 'POST',
+                headers: {'X-CSRF-Token': _igStatusCsrf},
+            }).then(function() { location.reload(); });
+        });
+    })
+    .catch(() => {});
+
+// ── Instagram FB Login flow ────────────────────────────────────────────────
+{% if meta_app_id %}
+document.getElementById('ig-connect-btn').addEventListener('click', function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Connessione…';
+
+    var csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).getAttribute('content') || '';
+
+    // FB Login requesting Instagram permissions
+    FB.login(function(response) {
+        if (!response.authResponse) {
+            btn.disabled = false;
+            btn.textContent = 'Collega Instagram';
+            return;
+        }
+
+        var token = response.authResponse.accessToken;
+
+        // Fetch IG Business Account ID from Graph API using the page token
+        FB.api('/me/accounts', { access_token: token }, function(pages) {
+            if (!pages || !pages.data || pages.data.length === 0) {
+                if (typeof showToast === 'function') showToast('Nessuna pagina Facebook trovata. Collega una pagina al tuo account Instagram Professional.', 'error');
+                btn.disabled = false;
+                btn.textContent = 'Collega Instagram';
+                return;
+            }
+
+            // Use first page that has an instagram_business_account
+            var page = pages.data[0];
+            var pageToken = page.access_token;
+
+            FB.api('/' + page.id + '?fields=instagram_business_account', { access_token: pageToken }, function(pageData) {
+                var igAccountId = pageData && pageData.instagram_business_account && pageData.instagram_business_account.id;
+                if (!igAccountId) {
+                    if (typeof showToast === 'function') showToast('Nessun account Instagram Professional collegato a questa pagina.', 'error');
+                    btn.disabled = false;
+                    btn.textContent = 'Collega Instagram';
+                    return;
+                }
+
+                fetch('/manage/api/instagram/callback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                    body: JSON.stringify({ instagram_page_id: igAccountId, access_token: pageToken }),
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.status === 'connected') {
+                        document.getElementById('ig-status').innerHTML =
+                            '<div class="flex items-center gap-3 bg-purple-50 border border-purple-200 px-4 py-3 rounded-xl">' +
+                            '<svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+                            '<div><p class="text-purple-700 font-medium text-sm">Instagram collegato</p>' +
+                            '<p class="text-purple-600 text-xs">Page ID: ' + data.instagram_page_id + '</p></div>' +
+                            '</div>';
+                        if (typeof showToast === 'function') showToast('Instagram collegato con successo!', 'success');
+                    } else {
+                        if (typeof showToast === 'function') showToast('Errore: ' + (data.error || 'riprova'), 'error');
+                        btn.disabled = false;
+                        btn.textContent = 'Collega Instagram';
+                    }
+                })
+                .catch(function() {
+                    if (typeof showToast === 'function') showToast('Errore di rete, riprova.', 'error');
+                    btn.disabled = false;
+                    btn.textContent = 'Collega Instagram';
+                });
+            });
+        });
+    }, {
+        scope: 'instagram_basic,instagram_manage_messages,pages_show_list,pages_read_engagement,pages_messaging',
+        return_scopes: true,
+    });
+});
+{% else %}
+document.getElementById('ig-connect-btn').addEventListener('click', function() {
     alert('Configurazione Meta non ancora attiva. Contatta il supporto Lyo.');
 });
 {% endif %}

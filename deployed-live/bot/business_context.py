@@ -52,6 +52,29 @@ def load_business_by_phone_number_id(phone_number_id: str) -> dict:
         return dict(zip(cols, row))
 
 
+def load_business_by_instagram_page_id(instagram_page_id: str) -> dict:
+    """Look up business by Instagram Business Account ID (entry[].id in IG webhook)."""
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, name, slug, timezone, language, bot_name, bot_persona,
+                      address, phone, email, owner_email, google_calendar_id,
+                      whatsapp_phone_number_id, waba_id, meta_access_token,
+                      instagram_page_id, instagram_access_token,
+                      google_service_account_json, status, settings
+               FROM businesses
+               WHERE instagram_page_id = %s AND status = 'active'""",
+            (instagram_page_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise BusinessNotFoundError(
+                f"No active business for instagram_page_id={instagram_page_id}"
+            )
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+
+
 def load_services(business_id: int) -> dict:
     """Load treatments from DB in SALON_SERVICES-compatible format.
 

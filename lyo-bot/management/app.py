@@ -75,7 +75,7 @@ async def dashboard(request: Request):
 
 
 # Import and register route modules
-from management.routes import treatments, operators, hours, settings as settings_routes, appointments, users, calendar, onboarding, faq, superadmin  # noqa: E402
+from management.routes import treatments, operators, hours, settings as settings_routes, appointments, users, calendar, onboarding, faq, superadmin, instagram  # noqa: E402
 
 mgmt_app.include_router(appointments.router)
 mgmt_app.include_router(treatments.router)
@@ -87,3 +87,4 @@ mgmt_app.include_router(calendar.router)
 mgmt_app.include_router(onboarding.router)
 mgmt_app.include_router(faq.router)
 mgmt_app.include_router(superadmin.router)
+mgmt_app.include_router(instagram.router)
