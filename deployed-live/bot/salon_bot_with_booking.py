@@ -87,10 +87,16 @@ logger.info(f"OpenAI SDK version: {openai.__version__} (major: {OPENAI_SDK_VERSI
 if OPENAI_SDK_VERSION >= 1:
     # New SDK v1.0+ syntax
     openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    _OAIRateLimitError = openai.RateLimitError
+    _OAITimeoutError = openai.APITimeoutError
+    _OAIConnectionError = openai.APIConnectionError
 else:
     # Old SDK v0.x syntax
     openai.api_key = OPENAI_API_KEY
     openai_client = None  # Use module-level calls for old SDK
+    _OAIRateLimitError = openai.error.RateLimitError
+    _OAITimeoutError = openai.error.Timeout
+    _OAIConnectionError = openai.error.APIConnectionError
 
 # WhatsApp Configuration - MUST be set via environment variables
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
@@ -3529,17 +3535,17 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
 
             return response_text
 
-    except openai.RateLimitError as e:
+    except _OAIRateLimitError as e:
         logger.error(f"❌ Rate limit error: {e}")
         return ("We're experiencing high demand. Please try again in a moment. "
                 "/ Alto traffico, riprova tra qualche secondo. "
                 "Or call us at +39 02 8394 5621 / Oppure chiamaci.")
-    except openai.APITimeoutError as e:
+    except _OAITimeoutError as e:
         logger.error(f"❌ API timeout: {e}")
         return ("Connection slow, please try again. "
                 "/ Connessione lenta, riprova. "
                 "Or call us at +39 02 8394 5621 / Oppure chiamaci.")
-    except openai.APIConnectionError as e:
+    except _OAIConnectionError as e:
         logger.error(f"❌ API connection error: {e}")
         return ("Connection issue, please try again. "
                 "/ Problema di connessione, riprova. "
@@ -3659,8 +3665,12 @@ async def send_instagram_message(recipient_id: str, message: str, business: dict
         logger.error("[IG] No access token configured")
         return False
 
-    # Use Graph API with explicit page ID for multi-tenant; fall back to /me for single-tenant
-    if ig_page_id:
+    # Instagram User Access Tokens (IGAAg...) must use graph.instagram.com/me/messages.
+    # Page Access Tokens use graph.facebook.com/{page_id}/messages.
+    # We detect by token prefix: IGAAG = User token, EAAg = Page token.
+    if token.startswith("IGAA") or token.startswith("IGAAg"):
+        url = "https://graph.instagram.com/v21.0/me/messages"
+    elif ig_page_id:
         url = f"https://graph.facebook.com/v21.0/{ig_page_id}/messages"
     else:
         url = "https://graph.instagram.com/v21.0/me/messages"
@@ -4124,7 +4134,14 @@ async def instagram_webhook(request: Request):
             if ig_page_id:
                 try:
                     business = load_business_by_instagram_page_id(ig_page_id)
-                    biz_context = {"business": business}
+                    biz_context = {
+                        "business": business,
+                        "services": load_services(business["id"]),
+                        "hours": load_business_hours(business["id"]),
+                        "closures": load_closures(business["id"]),
+                        "operators": load_operators(business["id"]),
+                        "faqs": load_faqs(business["id"]),
+                    }
                 except BusinessNotFoundError:
                     logger.warning(f"[IG] No active business for instagram_page_id={ig_page_id} — skipping entry")
                     continue
