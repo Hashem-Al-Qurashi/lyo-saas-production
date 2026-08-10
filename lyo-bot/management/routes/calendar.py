@@ -263,6 +263,31 @@ async def api_move_appointment(request: Request, appointment_id: int):
     return JSONResponse({"status": "moved"})
 
 
+@router.post("/manage/api/appointments/{appointment_id}/cancel")
+async def api_cancel_appointment(request: Request, appointment_id: int):
+    user = _get_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """UPDATE appointments SET status = 'cancelled', updated_at = NOW()
+               WHERE id = %s AND business_id = %s AND status = 'confirmed'""",
+            (appointment_id, user["business_id"]),
+        )
+        if cur.rowcount == 0:
+            return JSONResponse({"error": "not found or not confirmed"}, status_code=404)
+        # Cascade to auto-addon children
+        cur.execute(
+            """UPDATE appointments SET status = 'cancelled', updated_at = NOW()
+               WHERE parent_appointment_id = %s AND business_id = %s AND status = 'confirmed'""",
+            (appointment_id, user["business_id"]),
+        )
+
+    return JSONResponse({"status": "cancelled"})
+
+
 @router.post("/manage/api/appointments")
 async def api_create_appointment(request: Request):
     user = _get_user(request)
