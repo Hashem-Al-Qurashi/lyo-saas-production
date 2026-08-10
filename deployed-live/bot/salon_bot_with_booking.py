@@ -1858,6 +1858,37 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                     "message": f"Sorry, {time} on {date} is already booked. Nearest available times: {', '.join(available_alternatives)}"
                 }
 
+            # Customer conflict check: prevent same phone from booking overlapping slots
+            if business_id is not None:
+                _req_dur_cust = service.get("duration", 60)
+                cur.execute(
+                    """SELECT id, treatment_name, appointment_time::text
+                       FROM appointments
+                       WHERE business_id = %s
+                         AND customer_phone = %s
+                         AND appointment_date = %s
+                         AND status = 'confirmed'
+                         AND appointment_time < (%s::time + (%s || ' minutes')::interval)
+                         AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
+                    (business_id, normalized_phone, date, time, _req_dur_cust, time)
+                )
+                _cust_conflict = cur.fetchone()
+                if _cust_conflict:
+                    _ex_time = str(_cust_conflict[2])[:5]
+                    return {
+                        "success": False,
+                        "error": "CUSTOMER_ALREADY_BOOKED",
+                        "existing_appointment_id": _cust_conflict[0],
+                        "existing_treatment": _cust_conflict[1],
+                        "existing_time": _ex_time,
+                        "date": date,
+                        "time": time,
+                        "message_it": (
+                            f"Hai già un appuntamento per {_cust_conflict[1]} "
+                            f"alle {_ex_time} in quella data."
+                        ),
+                    }
+
             # Create Google Calendar event first
             business = biz_context["business"] if biz_context else None
             google_event_id = create_calendar_event(
