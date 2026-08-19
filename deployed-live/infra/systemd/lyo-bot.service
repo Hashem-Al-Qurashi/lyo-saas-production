@@ -1,0 +1,17 @@
+[Unit]
+Description=Lyo WhatsApp Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user
+EnvironmentFile=/home/ec2-user/.env
+ExecStart=/usr/bin/python3 salon_bot_with_booking.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/ec2-user/bot.log
+StandardError=append:/home/ec2-user/bot.log
+
+[Install]
+WantedBy=multi-user.target

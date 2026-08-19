@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="it" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Lyo Virtual Assistant{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    {% if request.state.csrf_token is defined %}
+    <meta name="csrf-token" content="{{ request.state.csrf_token }}">
+    {% endif %}
+    <script>
+    tailwind.config = {
+        theme: {
+            extend: {
+                colors: {
+                    brand: { DEFAULT: '#0084d2', light: '#e1f4ff', dark: '#006bad', darker: '#005a91', glow: 'rgba(0,132,210,0.15)' },
+                    surface: { DEFAULT: '#f8fafc', raised: '#ffffff', muted: '#f1f5f9' },
+                    ink: { DEFAULT: '#0f172a', secondary: '#475569', tertiary: '#94a3b8', faint: '#cbd5e1' }
+                },
+                fontFamily: { sans: ['"Plus Jakarta Sans"', 'system-ui', '-apple-system', 'sans-serif'] },
+                borderRadius: { '2xl': '1rem', '3xl': '1.25rem', '4xl': '1.5rem' },
+                boxShadow: {
+                    'glass': '0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02)',
+                    'lifted': '0 4px 20px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04)',
+                    'elevated': '0 12px 40px rgba(0,0,0,0.08), 0 2px 8px rgba(0,0,0,0.04)',
+                    'glow': '0 0 20px rgba(0,132,210,0.15), 0 0 60px rgba(0,132,210,0.05)',
+                    'glow-lg': '0 0 30px rgba(0,132,210,0.2), 0 0 80px rgba(0,132,210,0.08)',
+                    'inner-glow': 'inset 0 1px 0 rgba(255,255,255,0.6)',
+                },
+                animation: {
+                    'fade-in': 'fadeIn 0.5s cubic-bezier(0.16,1,0.3,1) forwards',
+                    'slide-up': 'slideUp 0.5s cubic-bezier(0.16,1,0.3,1) forwards',
+                    'float': 'float 6s ease-in-out infinite',
+                }
+            }
+        }
+    }
+    </script>
+    {% block head %}{% endblock %}
+</head>
+<body class="h-full bg-surface font-sans text-ink antialiased">
+
+    {% if user %}
+    {% set path = request.url.path %}
+    <!-- Mobile overlay -->
+    <div id="sidebar-overlay" class="fixed inset-0 bg-ink/40 backdrop-blur-sm z-40 lg:hidden hidden transition-opacity duration-300" onclick="toggleSidebar()"></div>
+
+    <!-- Sidebar — frosted glass -->
+    <aside id="sidebar" class="fixed inset-y-0 left-0 z-50 w-[272px] transform -translate-x-full lg:translate-x-0 transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] flex flex-col bg-white/80 backdrop-blur-xl border-r border-black/[0.04]">
+        <!-- Brand -->
+        <div class="flex items-center h-[72px] px-6">
+            <div class="flex items-center gap-3">
+                <img src="/manage/static/lyo-logo.png" alt="Lyo" class="w-10 h-10 object-contain drop-shadow-sm">
+                <div>
+                    <span class="font-bold text-ink text-[17px] tracking-tight leading-none">Lyo</span>
+                    <span class="text-[9px] font-semibold block leading-none mt-1 tracking-[0.15em] uppercase text-brand">Virtual Assistant</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Nav links -->
+        <nav class="flex-1 px-3 py-3 space-y-0.5 overflow-y-auto">
+            <a href="/manage/dashboard" class="sidebar-link {% if '/dashboard' in path %}active{% endif %}">
+                <svg class="sidebar-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+                <span>Dashboard</span>
+            </a>
+            <a href="/manage/appointments/" class="sidebar-link {% if '/appointments' in path %}active{% endif %}">
+                <svg class="sidebar-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                <span>Appuntamenti</span>
+            </a>
+            <a href="/manage/calendar/" class="sidebar-link {% if '/calendar' in path %}active{% endif %}">
+                <svg class="sidebar-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                <span>Calendario</span>
+            </a>
+
+            <div class="pt-6 pb-2">
+                <p class="px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-tertiary">Configurazione</p>
+            </div>
+
+            <a href="/manage/treatments/" class="sidebar-link {% if '/treatments' in path %}active{% endif %}">
+                <svg class="sidebar-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>
+                <span>Trattamenti</span>
+            </a>
+            <a href="/manage/operators/" class="sidebar-link {% if '/operators' in path %}active{% endif %}">
+                <svg class="sidebar-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+                <span>Operatori</span>
+            </a>
+            <a href="/manage/hours/" class="sidebar-link {% if '/hours' in path %}active{% endif %}">
+                <svg class="sidebar-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <span>Orari</span>
+            </a>
+            <a href="/manage/faq/" class="sidebar-link {% if '/faq' in path %}active{% endif %}">
+                <svg class="sidebar-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <span>FAQ</span>
+            </a>
+
+            {% if user.role is defined and user.role in ('owner', 'admin') %}
+            <div class="pt-6 pb-2">
+                <p class="px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-tertiary">Amministrazione</p>
+            </div>
+            <a href="/manage/settings/" class="sidebar-link {% if '/settings' in path %}active{% endif %}">
+                <svg class="sidebar-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                <span>Impostazioni</span>
+            </a>
+            <a href="/manage/users/" class="sidebar-link {% if '/users' in path %}active{% endif %}">
+                <svg class="sidebar-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                <span>Utenti</span>
+            </a>
+            {% endif %}
+        </nav>
+
+        <!-- User section -->
+        <div class="p-4 mx-3 mb-3 rounded-2xl bg-gradient-to-br from-brand-light/80 to-brand-light/40 border border-brand/[0.08]">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold bg-brand text-white shadow-glow">
+                    {{ (user.sub or 'U')[0]|upper }}
+                </div>
+                <div class="flex-1 min-w-0">
+                    <p class="text-[13px] font-semibold truncate text-ink">{{ user.sub or 'Utente' }}</p>
+                    <p class="text-[11px] text-ink-tertiary font-medium">{{ user.role|default('staff')|title }}</p>
+                </div>
+                <a href="/manage/logout" class="p-1.5 rounded-lg text-ink-tertiary hover:text-ink-secondary hover:bg-white/60 transition-all duration-200" title="Esci">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+                </a>
+            </div>
+        </div>
+    </aside>
+    {% endif %}
+
+    <!-- Main content wrapper -->
+    <div class="{% if user %}lg:pl-[272px] min-h-screen flex flex-col{% else %}min-h-screen{% endif %}">
+        {% if user %}
+        <!-- Mobile header -->
+        <header class="sticky top-0 z-30 bg-white/70 backdrop-blur-xl border-b border-black/[0.04] lg:hidden">
+            <div class="flex items-center h-14 px-4">
+                <button onclick="toggleSidebar()" class="p-2 -ml-2 text-ink-tertiary hover:text-ink rounded-xl hover:bg-surface-muted transition-all duration-200">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                </button>
+                <div class="ml-3 flex items-center gap-2.5">
+                    <img src="/manage/static/lyo-logo.png" alt="Lyo" class="w-7 h-7 object-contain">
+                    <span class="font-bold text-ink text-[15px]">Lyo</span>
+                </div>
+            </div>
+        </header>
+        {% endif %}
+
+        <main class="{% if user %}flex-1 p-4 sm:p-6 lg:p-10{% endif %}">
+            {% block content %}{% endblock %}
+        </main>
+
+        {% if user %}
+        <footer class="py-6 px-6 text-center">
+            <p class="text-[11px] text-ink-tertiary font-medium tracking-wide">Lyo Virtual Assistant &middot; Powered by AI</p>
+        </footer>
+        {% endif %}
+    </div>
+
+    <!-- Toast container -->
+    <div id="toast-container" class="fixed top-4 right-4 z-[60] space-y-2 pointer-events-none"></div>
+
+    <script>
+    function toggleSidebar() {
+        var sidebar = document.getElementById('sidebar');
+        var overlay = document.getElementById('sidebar-overlay');
+        if (sidebar) {
+            sidebar.classList.toggle('-translate-x-full');
+            if (overlay) overlay.classList.toggle('hidden');
+        }
+    }
+
+    // CSRF injection
+    (function() {
+        var meta = document.querySelector('meta[name="csrf-token"]');
+        if (!meta) return;
+        var token = meta.getAttribute('content');
+        document.querySelectorAll('form[method="post"]').forEach(function(form) {
+            if (!form.querySelector('input[name="csrf_token"]')) {
+                var input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'csrf_token';
+                input.value = token;
+                form.appendChild(input);
+            }
+        });
+    })();
+
+    // Confirm destructive actions
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('form[action*="/delete"]').forEach(function(form) {
+            form.addEventListener('submit', function(e) {
+                if (!confirm('Sei sicuro di voler eliminare? Questa azione non può essere annullata.')) {
+                    e.preventDefault();
+                }
+            });
+        });
+    });
+
+    // Shared toggle edit function
+    function toggleEdit(prefix, id) {
+        var display = document.getElementById(prefix + '-display-' + id);
+        var edit = document.getElementById(prefix + '-edit-' + id);
+        if (display) display.classList.toggle('hidden');
+        if (edit) edit.classList.toggle('hidden');
+    }
+
+    // Toast system
+    function showToast(msg, type) {
+        type = type || 'success';
+        var colors = { success: 'bg-emerald-50 border-emerald-200/60 text-emerald-800', error: 'bg-red-50 border-red-200/60 text-red-800', info: 'bg-brand-light border-brand/20 text-brand-dark' };
+        var icons = {
+            success: '<svg class="w-5 h-5 text-emerald-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
+            error: '<svg class="w-5 h-5 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
+            info: '<svg class="w-5 h-5 text-brand flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
+        };
+        var container = document.getElementById('toast-container');
+        if (!container) return;
+        var toast = document.createElement('div');
+        toast.className = 'pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-2xl border shadow-elevated backdrop-blur-xl ' + (colors[type] || colors.info);
+        toast.style.animation = 'slideIn 0.4s cubic-bezier(0.16,1,0.3,1)';
+        var iconWrap = document.createElement('div');
+        iconWrap.innerHTML = icons[type] || '';
+        if (iconWrap.firstChild) toast.appendChild(iconWrap.firstChild);
+        var msgSpan = document.createElement('span');
+        msgSpan.className = 'text-sm font-medium';
+        msgSpan.textContent = msg;
+        toast.appendChild(msgSpan);
+        container.appendChild(toast);
+        setTimeout(function() {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateX(100%)';
+            toast.style.transition = 'all 400ms cubic-bezier(0.16,1,0.3,1)';
+            setTimeout(function() { toast.remove(); }, 400);
+        }, 4000);
+    }
+
+    // Staggered entrance animation
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('.animate-stagger').forEach(function(el, i) {
+            el.style.opacity = '0';
+            el.style.transform = 'translateY(12px)';
+            setTimeout(function() {
+                el.style.transition = 'all 0.5s cubic-bezier(0.16,1,0.3,1)';
+                el.style.opacity = '1';
+                el.style.transform = 'translateY(0)';
+            }, 80 + i * 60);
+        });
+    });
+    </script>
+
+    <style>
+    /* Keyframes */
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes slideIn { from { opacity: 0; transform: translateX(100%); } to { opacity: 1; transform: translateX(0); } }
+    @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+    @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+
+    /* Sidebar */
+    .sidebar-link {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem 0.75rem;
+        border-radius: 0.625rem;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        color: #475569;
+        transition: all 250ms cubic-bezier(0.16,1,0.3,1);
+        position: relative;
+    }
+    .sidebar-link:hover {
+        background: linear-gradient(135deg, #e1f4ff 0%, rgba(225,244,255,0.5) 100%);
+        color: #0084d2;
+    }
+    .sidebar-link.active {
+        background: linear-gradient(135deg, #0084d2 0%, #006bad 100%);
+        color: white;
+        box-shadow: 0 2px 12px rgba(0,132,210,0.3), 0 1px 3px rgba(0,132,210,0.2);
+    }
+    .sidebar-icon {
+        width: 1.25rem;
+        height: 1.25rem;
+        flex-shrink: 0;
+        color: #94a3b8;
+        transition: color 250ms ease;
+    }
+    .sidebar-link:hover .sidebar-icon { color: #0084d2; }
+    .sidebar-link.active .sidebar-icon { color: white; }
+
+    /* Form inputs */
+    .form-input {
+        width: 100%;
+        padding: 0.5rem 0.875rem;
+        border: 1.5px solid #e2e8f0;
+        border-radius: 0.75rem;
+        font-size: 0.875rem;
+        font-weight: 400;
+        transition: all 250ms cubic-bezier(0.16,1,0.3,1);
+        background: white;
+        color: #0f172a;
+    }
+    .form-input:focus {
+        outline: none;
+        border-color: #0084d2;
+        box-shadow: 0 0 0 3px rgba(0,132,210,0.1), 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .form-input::placeholder { color: #94a3b8; }
+
+    /* Cards */
+    .card {
+        background: white;
+        border: 1px solid rgba(0,0,0,0.04);
+        border-radius: 1.25rem;
+        padding: 1.5rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02);
+        transition: all 350ms cubic-bezier(0.16,1,0.3,1);
+    }
+    .card:hover {
+        box-shadow: 0 8px 30px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.03);
+    }
+
+    /* Badges */
+    .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.125rem 0.625rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 600;
+        line-height: 1.25rem;
+        letter-spacing: 0.01em;
+    }
+    .badge-green { background: linear-gradient(135deg, #ecfdf5, #d1fae5); color: #059669; }
+    .badge-red { background: linear-gradient(135deg, #fef2f2, #fecaca); color: #dc2626; }
+    .badge-blue { background: linear-gradient(135deg, #eff6ff, #dbeafe); color: #2563eb; }
+    .badge-gray { background: #f1f5f9; color: #64748b; }
+    .badge-indigo { background: linear-gradient(135deg, #e1f4ff, #b8e4ff); color: #0084d2; }
+    .badge-amber { background: linear-gradient(135deg, #fffbeb, #fef3c7); color: #d97706; }
+
+    /* Tables */
+    .data-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+    .data-table thead th {
+        padding: 0.75rem 1.25rem;
+        text-align: left;
+        font-size: 0.6875rem;
+        font-weight: 600;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        background: #f8fafc;
+        border-bottom: 1px solid rgba(0,0,0,0.04);
+    }
+    .data-table tbody td {
+        padding: 0.875rem 1.25rem;
+        font-size: 0.8125rem;
+        color: #334155;
+        border-bottom: 1px solid #f8fafc;
+    }
+    .data-table tbody tr { transition: background 200ms ease; }
+    .data-table tbody tr:hover { background: #f8fafc; }
+    .data-table tbody tr:last-child td { border-bottom: none; }
+
+    /* Buttons */
+    .btn-primary {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1.125rem;
+        background: linear-gradient(135deg, #0084d2 0%, #006bad 100%);
+        color: white;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        border-radius: 0.75rem;
+        border: none;
+        cursor: pointer;
+        transition: all 250ms cubic-bezier(0.16,1,0.3,1);
+        box-shadow: 0 1px 3px rgba(0,132,210,0.25), inset 0 1px 0 rgba(255,255,255,0.15);
+        letter-spacing: 0.01em;
+    }
+    .btn-primary:hover {
+        background: linear-gradient(135deg, #006bad 0%, #005a91 100%);
+        box-shadow: 0 4px 16px rgba(0,132,210,0.35), inset 0 1px 0 rgba(255,255,255,0.15);
+        transform: translateY(-1px);
+    }
+    .btn-primary:active { transform: translateY(0); box-shadow: 0 1px 3px rgba(0,132,210,0.25); }
+    .btn-secondary {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1.125rem;
+        background: white;
+        color: #334155;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        border-radius: 0.75rem;
+        border: 1.5px solid #e2e8f0;
+        cursor: pointer;
+        transition: all 250ms cubic-bezier(0.16,1,0.3,1);
+    }
+    .btn-secondary:hover {
+        background: #f8fafc;
+        border-color: #cbd5e1;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+
+    /* Actions */
+    .action-link {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        transition: all 200ms ease;
+        letter-spacing: 0.01em;
+    }
+    .action-edit { color: #0084d2; }
+    .action-edit:hover { color: #006bad; }
+    .action-delete { color: #ef4444; }
+    .action-delete:hover { color: #dc2626; }
+
+    /* Brand utilities */
+    .bg-brand { background-color: #0084d2; }
+    .bg-brand-light { background-color: #e1f4ff; }
+    .text-brand { color: #0084d2; }
+    .text-brand-dark { color: #006bad; }
+    input[type="checkbox"].text-brand,
+    input[type="checkbox"].accent-brand { accent-color: #0084d2; }
+    .hover\:text-brand-dark:hover { color: #006bad; }
+    .hover\:bg-brand-light:hover { background-color: #e1f4ff; }
+    .focus\:ring-brand:focus {
+        --tw-ring-color: rgba(0, 132, 210, 0.3);
+        box-shadow: 0 0 0 3px rgba(0, 132, 210, 0.15);
+    }
+
+    /* Section icons */
+    .section-icon {
+        width: 2.25rem;
+        height: 2.25rem;
+        border-radius: 0.625rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: linear-gradient(135deg, #e1f4ff 0%, rgba(225,244,255,0.5) 100%);
+        box-shadow: 0 1px 3px rgba(0,132,210,0.08);
+    }
+    .section-icon svg { width: 1rem; height: 1rem; color: #0084d2; }
+    </style>
+</body>
+</html>

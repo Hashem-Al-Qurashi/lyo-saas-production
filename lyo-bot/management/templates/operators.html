@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Operatori - Lyo Virtual Assistant{% endblock %}
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900 tracking-tight">Operatori</h1>
+    <p class="text-sm text-gray-500 mt-1">Gestisci il team e le assegnazioni ai trattamenti</p>
+</div>
+
+<!-- Add Operator Form -->
+<div class="card mb-6">
+    <div class="flex items-center gap-3 mb-5">
+        <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: #e1f4ff;">
+            <svg class="w-4 h-4" style="color: #0084d2;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"/></svg>
+        </div>
+        <h2 class="text-base font-semibold text-gray-900">Aggiungi Operatore</h2>
+    </div>
+    <form method="post" action="/manage/operators/add" class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">Nome</label>
+            <input type="text" name="display_name" required class="form-input" placeholder="es. Antonio Rossi">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">Specializzazione (visibile al bot)</label>
+            <input type="text" name="notes" class="form-input" placeholder="es. specialista colore">
+        </div>
+        <div>
+            <button type="submit" class="btn-primary w-full justify-center">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                Aggiungi
+            </button>
+        </div>
+    </form>
+</div>
+
+<!-- Operators Table -->
+<div class="card p-0 overflow-hidden">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Nome</th>
+                <th>Specializzazione</th>
+                <th>Attivo</th>
+                <th>Trattamenti</th>
+                <th>Azioni</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for op in operators %}
+            <tr id="op-display-{{ op[0] }}">
+                <td>
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 bg-brand-light text-brand rounded-full flex items-center justify-center text-xs font-semibold">
+                            {{ op[2][0]|upper }}
+                        </div>
+                        <span class="font-medium text-gray-900">{{ op[2] }}</span>
+                    </div>
+                </td>
+                <td class="text-gray-500">{{ op[5] or '-' }}</td>
+                <td>
+                    {% if op[3] %}
+                    <span class="badge badge-green">Attivo</span>
+                    {% else %}
+                    <span class="badge badge-red">Inattivo</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <form method="post" action="/manage/operators/{{ op[0] }}/treatments" class="flex flex-wrap gap-2 items-center">
+                        {% for treat in treatments %}
+                        <label class="inline-flex items-center text-xs gap-1 cursor-pointer hover:text-brand transition-colors">
+                            <input type="checkbox" name="treatment_ids" value="{{ treat[0] }}"
+                                   {% if op[0] in op_treatments and treat[0] in op_treatments[op[0]] %}checked{% endif %}
+                                   class="rounded text-brand border-gray-300 focus:ring-brand w-3.5 h-3.5">
+                            {{ treat[2] }}
+                        </label>
+                        {% endfor %}
+                        <button type="submit" class="text-xs text-brand hover:text-brand-dark font-medium ml-2 bg-brand-light px-2 py-0.5 rounded-md hover:bg-brand-light transition-colors">Salva</button>
+                    </form>
+                </td>
+                <td>
+                    <div class="flex items-center gap-3">
+                        <button onclick="toggleEdit('op', {{ op[0] }})" class="action-link action-edit">Modifica</button>
+                        <form method="post" action="/manage/operators/{{ op[0] }}/delete" class="inline">
+                            <button type="submit" class="action-link action-delete">Elimina</button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            <tr id="op-edit-{{ op[0] }}" class="hidden bg-brand-light">
+                <td colspan="5" class="px-5 py-4 space-y-4">
+                    <form method="post" action="/manage/operators/{{ op[0] }}/edit" class="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">Nome</label>
+                            <input type="text" name="display_name" value="{{ op[2] }}" required class="form-input text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-600 mb-1">Specializzazione (visibile al bot)</label>
+                            <input type="text" name="notes" value="{{ op[5] or '' }}" class="form-input text-sm" placeholder="es. specialista colore">
+                        </div>
+                        <div>
+                            <label class="inline-flex items-center text-xs gap-1.5 cursor-pointer">
+                                <input type="checkbox" name="is_active" value="true" {% if op[3] %}checked{% endif %} class="rounded text-brand border-gray-300 focus:ring-brand">
+                                Attivo
+                            </label>
+                        </div>
+                        <div class="flex gap-2">
+                            <button type="submit" class="btn-primary text-xs py-1.5 px-3">Salva</button>
+                            <button type="button" onclick="toggleEdit('op', {{ op[0] }})" class="btn-secondary text-xs py-1.5 px-3">Annulla</button>
+                        </div>
+                    </form>
+                    <!-- Working Hours -->
+                    <form method="post" action="/manage/operators/{{ op[0] }}/hours">
+                        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Orari di lavoro</p>
+                        {% set days = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'] %}
+                        <div class="grid grid-cols-7 gap-2 mb-3">
+                            {% for dow in range(7) %}
+                            {% set day_info = op_hours.get(op[0], {}).get(dow) %}
+                            {% set is_working = day_info[0] if day_info is not none else true %}
+                            {% set start_t = day_info[1] if day_info is not none else '' %}
+                            {% set end_t = day_info[2] if day_info is not none else '' %}
+                            {% set break_s = day_info[3] if day_info is not none and day_info|length > 3 else '' %}
+                            {% set break_e = day_info[4] if day_info is not none and day_info|length > 4 else '' %}
+                            <div class="bg-white rounded-lg border border-gray-200 p-2 text-center">
+                                <p class="text-xs font-semibold text-gray-700 mb-1.5">{{ days[dow] }}</p>
+                                <label class="inline-flex items-center gap-1 text-xs text-gray-600 cursor-pointer mb-2">
+                                    <input type="checkbox" name="working_{{ dow }}" value="1" {% if is_working %}checked{% endif %}
+                                           class="rounded text-brand border-gray-300 focus:ring-brand w-3.5 h-3.5">
+                                    Lavora
+                                </label>
+                                <input type="time" name="start_{{ dow }}" value="{{ start_t or '' }}"
+                                       class="w-full text-xs border border-gray-200 rounded px-1 py-0.5 mb-1 focus:outline-none focus:ring-1 focus:ring-brand">
+                                <input type="time" name="end_{{ dow }}" value="{{ end_t or '' }}"
+                                       class="w-full text-xs border border-gray-200 rounded px-1 py-0.5 mb-1 focus:outline-none focus:ring-1 focus:ring-brand">
+                                <p class="text-[9px] text-ink-tertiary mt-1 mb-0.5">Pausa</p>
+                                <input type="time" name="break_start_{{ dow }}" value="{{ break_s or '' }}"
+                                       class="w-full text-xs border border-gray-200 rounded px-1 py-0.5 mb-1 focus:outline-none focus:ring-1 focus:ring-brand" placeholder="Inizio">
+                                <input type="time" name="break_end_{{ dow }}" value="{{ break_e or '' }}"
+                                       class="w-full text-xs border border-gray-200 rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-brand" placeholder="Fine">
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <button type="submit" class="btn-primary text-xs py-1.5 px-3">Salva orari</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% if not operators %}
+    <div class="p-12 text-center">
+        <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        <p class="text-gray-500 text-sm">Nessun operatore configurato.</p>
+        <p class="text-gray-400 text-xs mt-1">Aggiungi il primo membro del team.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

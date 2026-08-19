@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}FAQ - Lyo Virtual Assistant{% endblock %}
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900 tracking-tight">Domande Frequenti (FAQ)</h1>
+    <p class="text-sm text-gray-500 mt-1">Le FAQ vengono lette dal bot WhatsApp per rispondere alle domande dei clienti. Aggiungi domande e risposte comuni per migliorare le risposte automatiche.</p>
+</div>
+
+<!-- Add FAQ Form -->
+<div class="card mb-6">
+    <div class="flex items-center gap-3 mb-5">
+        <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: #e1f4ff;">
+            <svg class="w-4 h-4" style="color: #0084d2;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+        </div>
+        <h2 class="text-base font-semibold text-gray-900">Aggiungi FAQ</h2>
+    </div>
+    <form method="post" action="/manage/faq/add" class="space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Domanda</label>
+                <input type="text" name="question" required class="form-input" placeholder="es. Quanto costa una piega?">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Risposta</label>
+                <textarea name="answer" required rows="2" class="form-input" placeholder="es. La piega costa 25 euro"></textarea>
+            </div>
+        </div>
+        <div>
+            <button type="submit" class="btn-primary">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                Aggiungi
+            </button>
+        </div>
+    </form>
+</div>
+
+<!-- FAQ Table -->
+<div class="card p-0 overflow-hidden">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Domanda</th>
+                <th>Risposta</th>
+                <th>Attivo</th>
+                <th>Azioni</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for f in faqs %}
+            <tr id="faq-display-{{ f[0] }}">
+                <td class="font-medium text-gray-900">{{ f[1] }}</td>
+                <td class="text-gray-500 max-w-xs truncate">{{ f[2] }}</td>
+                <td>
+                    {% if f[3] %}
+                    <span class="badge badge-green">Attivo</span>
+                    {% else %}
+                    <span class="badge badge-red">Inattivo</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <div class="flex items-center gap-3">
+                        <button onclick="toggleEdit('faq', {{ f[0] }})" class="action-link action-edit">Modifica</button>
+                        <form method="post" action="/manage/faq/{{ f[0] }}/delete" class="inline">
+                            <button type="submit" class="action-link action-delete">Elimina</button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            <tr id="faq-edit-{{ f[0] }}" class="hidden bg-brand-light">
+                <td colspan="4" class="px-5 py-4">
+                    <form method="post" action="/manage/faq/{{ f[0] }}/edit" class="space-y-3">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Domanda</label>
+                                <input type="text" name="question" value="{{ f[1] }}" required class="form-input text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-medium text-gray-600 mb-1">Risposta</label>
+                                <textarea name="answer" rows="2" required class="form-input text-sm">{{ f[2] }}</textarea>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-4 mt-1">
+                            <label class="inline-flex items-center text-xs gap-1.5 cursor-pointer">
+                                <input type="checkbox" name="is_active" value="true" {% if f[3] %}checked{% endif %} class="rounded text-brand border-gray-300 focus:ring-brand">
+                                Attivo
+                            </label>
+                            <div class="flex gap-2">
+                                <button type="submit" class="btn-primary text-xs py-1.5 px-3">Salva</button>
+                                <button type="button" onclick="toggleEdit('faq', {{ f[0] }})" class="btn-secondary text-xs py-1.5 px-3">Annulla</button>
+                            </div>
+                        </div>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% if not faqs %}
+    <div class="p-12 text-center">
+        <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        <p class="text-gray-500 text-sm">Nessuna FAQ configurata.</p>
+        <p class="text-gray-400 text-xs mt-1">Aggiungi domande e risposte comuni per aiutare il bot a rispondere ai clienti.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

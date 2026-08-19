@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Super Admin - Lyo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+    tailwind.config = {
+        theme: {
+            extend: {
+                colors: {
+                    brand: { DEFAULT: '#0084d2', light: '#e1f4ff', dark: '#006bad' },
+                    surface: { DEFAULT: '#f8fafc', raised: '#ffffff', muted: '#f1f5f9' },
+                    ink: { DEFAULT: '#0f172a', secondary: '#475569', tertiary: '#94a3b8', faint: '#cbd5e1' }
+                },
+                fontFamily: { sans: ['"Plus Jakarta Sans"', 'system-ui', 'sans-serif'] },
+            }
+        }
+    }
+    </script>
+    <style>
+        body { font-family: "Plus Jakarta Sans", system-ui, sans-serif; }
+        .btn-primary { background: #0084d2; color: white; font-weight: 600; padding: 0.625rem 1.25rem; border-radius: 0.75rem; display: inline-flex; align-items: center; gap: 0.5rem; transition: background 0.15s; cursor: pointer; border: none; }
+        .btn-primary:hover { background: #006bad; }
+        .btn-danger { background: #fee2e2; color: #dc2626; font-weight: 600; padding: 0.375rem 0.875rem; border-radius: 0.625rem; font-size: 0.8125rem; border: none; cursor: pointer; transition: background 0.15s; }
+        .btn-danger:hover { background: #fecaca; }
+        .btn-success { background: #dcfce7; color: #16a34a; font-weight: 600; padding: 0.375rem 0.875rem; border-radius: 0.625rem; font-size: 0.8125rem; border: none; cursor: pointer; transition: background 0.15s; }
+        .btn-success:hover { background: #bbf7d0; }
+        .badge-active { background: #dcfce7; color: #15803d; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+        .badge-inactive { background: #f1f5f9; color: #64748b; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+    </style>
+</head>
+<body class="bg-surface min-h-screen">
+
+    <!-- Top bar -->
+    <header class="bg-white border-b border-black/[0.06] sticky top-0 z-10">
+        <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <img src="/manage/static/lyo-logo.png" alt="Lyo" class="w-8 h-8 object-contain">
+                <span class="font-bold text-ink text-[17px] tracking-tight">Lyo</span>
+                <span class="text-ink-faint mx-1">/</span>
+                <span class="text-[13px] font-semibold text-brand uppercase tracking-widest">Super Admin</span>
+            </div>
+            <a href="/superadmin/logout" class="text-[13px] text-ink-secondary hover:text-ink font-medium transition-colors">
+                Logout
+            </a>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-6 py-10 space-y-10">
+
+        <!-- Alerts -->
+        {% if success %}
+        <div class="flex items-center gap-3 bg-green-50 border border-green-200/60 text-green-700 px-5 py-4 rounded-2xl text-sm font-medium">
+            <svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            {{ success }}
+        </div>
+        {% endif %}
+        {% if error %}
+        <div class="flex items-center gap-3 bg-red-50 border border-red-200/60 text-red-700 px-5 py-4 rounded-2xl text-sm font-medium">
+            <svg class="w-5 h-5 text-red-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            {{ error }}
+        </div>
+        {% endif %}
+
+        <!-- Create new tenant -->
+        <div class="bg-white rounded-3xl border border-black/[0.05] shadow-sm p-8">
+            <h2 class="text-lg font-bold text-ink mb-1">Aggiungi nuovo salone</h2>
+            <p class="text-[13px] text-ink-tertiary mb-7">Crea un account indipendente con calendario e dati separati</p>
+
+            <form method="post" action="/superadmin/tenants/create">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                    <div class="sm:col-span-2">
+                        <label class="block text-[13px] font-semibold text-ink-secondary mb-2">Nome del salone <span class="text-red-400">*</span></label>
+                        <input type="text" name="salon_name" required placeholder="es. Roberto Studio"
+                               class="w-full px-4 py-3 border-[1.5px] border-ink-faint/60 rounded-xl focus:outline-none focus:border-brand focus:ring-[3px] focus:ring-[rgba(0,132,210,0.12)] transition-all text-[14px]">
+                    </div>
+                    <div>
+                        <label class="block text-[13px] font-semibold text-ink-secondary mb-2">Nome proprietario <span class="text-red-400">*</span></label>
+                        <input type="text" name="owner_name" required placeholder="es. Roberto Rossi"
+                               class="w-full px-4 py-3 border-[1.5px] border-ink-faint/60 rounded-xl focus:outline-none focus:border-brand focus:ring-[3px] focus:ring-[rgba(0,132,210,0.12)] transition-all text-[14px]">
+                    </div>
+                    <div>
+                        <label class="block text-[13px] font-semibold text-ink-secondary mb-2">Email proprietario <span class="text-red-400">*</span></label>
+                        <input type="email" name="owner_email" required placeholder="roberto@email.com"
+                               class="w-full px-4 py-3 border-[1.5px] border-ink-faint/60 rounded-xl focus:outline-none focus:border-brand focus:ring-[3px] focus:ring-[rgba(0,132,210,0.12)] transition-all text-[14px]">
+                    </div>
+                    <div>
+                        <label class="block text-[13px] font-semibold text-ink-secondary mb-2">Password iniziale <span class="text-red-400">*</span></label>
+                        <input type="text" name="owner_password" required placeholder="min. 6 caratteri"
+                               class="w-full px-4 py-3 border-[1.5px] border-ink-faint/60 rounded-xl focus:outline-none focus:border-brand focus:ring-[3px] focus:ring-[rgba(0,132,210,0.12)] transition-all text-[14px]">
+                    </div>
+                    <div>
+                        <label class="block text-[13px] font-semibold text-ink-secondary mb-2">Fuso orario</label>
+                        <select name="timezone"
+                                class="w-full px-4 py-3 border-[1.5px] border-ink-faint/60 rounded-xl focus:outline-none focus:border-brand focus:ring-[3px] focus:ring-[rgba(0,132,210,0.12)] transition-all text-[14px] bg-white">
+                            <option value="Europe/Rome" selected>Europe/Rome</option>
+                            <option value="Europe/London">Europe/London</option>
+                            <option value="Europe/Paris">Europe/Paris</option>
+                            <option value="Europe/Berlin">Europe/Berlin</option>
+                            <option value="Europe/Madrid">Europe/Madrid</option>
+                            <option value="America/New_York">America/New_York</option>
+                            <option value="America/Los_Angeles">America/Los_Angeles</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="mt-6 pt-6 border-t border-ink-faint/30 flex items-center justify-between">
+                    <p class="text-[12px] text-ink-tertiary">Gli orari verranno impostati su Lun-Sab 09:00-19:00 (modificabili dal proprietario)</p>
+                    <button type="submit" class="btn-primary">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                        Crea salone
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Tenant list -->
+        <div class="bg-white rounded-3xl border border-black/[0.05] shadow-sm overflow-hidden">
+            <div class="px-8 py-6 border-b border-ink-faint/30 flex items-center justify-between">
+                <div>
+                    <h2 class="text-lg font-bold text-ink">Saloni attivi</h2>
+                    <p class="text-[13px] text-ink-tertiary mt-0.5">{{ businesses|length }} tenant registrati</p>
+                </div>
+            </div>
+
+            {% if businesses %}
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b border-ink-faint/30">
+                            <th class="text-left px-8 py-4 text-[11px] font-semibold uppercase tracking-widest text-ink-tertiary">Salone</th>
+                            <th class="text-left px-4 py-4 text-[11px] font-semibold uppercase tracking-widest text-ink-tertiary">Slug</th>
+                            <th class="text-center px-4 py-4 text-[11px] font-semibold uppercase tracking-widest text-ink-tertiary">Appuntamenti</th>
+                            <th class="text-center px-4 py-4 text-[11px] font-semibold uppercase tracking-widest text-ink-tertiary">Utenti</th>
+                            <th class="text-center px-4 py-4 text-[11px] font-semibold uppercase tracking-widest text-ink-tertiary">Stato</th>
+                            <th class="text-left px-4 py-4 text-[11px] font-semibold uppercase tracking-widest text-ink-tertiary">Creato</th>
+                            <th class="px-8 py-4"></th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-ink-faint/20">
+                        {% for biz in businesses %}
+                        {% set biz_id, biz_name, biz_slug, biz_status, biz_created, appt_count, user_count = biz %}
+                        <tr class="hover:bg-surface/60 transition-colors">
+                            <td class="px-8 py-5">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-9 h-9 rounded-xl bg-brand-light flex items-center justify-center text-brand font-bold text-sm flex-shrink-0">
+                                        {{ biz_name[0].upper() }}
+                                    </div>
+                                    <div>
+                                        <p class="font-semibold text-ink text-sm">{{ biz_name }}</p>
+                                        <p class="text-[12px] text-ink-tertiary">ID {{ biz_id }}</p>
+                                    </div>
+                                </div>
+                            </td>
+                            <td class="px-4 py-5">
+                                <code class="text-[12px] text-ink-secondary bg-surface px-2 py-1 rounded-lg">{{ biz_slug }}</code>
+                            </td>
+                            <td class="px-4 py-5 text-center">
+                                <span class="font-semibold text-ink text-sm">{{ appt_count }}</span>
+                            </td>
+                            <td class="px-4 py-5 text-center">
+                                <span class="font-semibold text-ink text-sm">{{ user_count }}</span>
+                            </td>
+                            <td class="px-4 py-5 text-center">
+                                {% if biz_status == 'active' %}
+                                <span class="badge-active">Attivo</span>
+                                {% else %}
+                                <span class="badge-inactive">Inattivo</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-4 py-5 text-[12px] text-ink-tertiary">
+                                {{ biz_created[:10] if biz_created else '—' }}
+                            </td>
+                            <td class="px-8 py-5 text-right">
+                                <form method="post" action="/superadmin/tenants/{{ biz_id }}/toggle" class="inline">
+                                    {% if biz_status == 'active' %}
+                                    <button type="submit" class="btn-danger" onclick="return confirm('Disattivare {{ biz_name }}?')">
+                                        Disattiva
+                                    </button>
+                                    {% else %}
+                                    <button type="submit" class="btn-success">
+                                        Attiva
+                                    </button>
+                                    {% endif %}
+                                </form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="px-8 py-16 text-center">
+                <p class="text-ink-tertiary text-sm">Nessun salone registrato</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <p class="text-center text-[11px] text-ink-tertiary pb-4">Lyo Platform &middot; Super Admin Panel</p>
+    </main>
+</body>
+</html>

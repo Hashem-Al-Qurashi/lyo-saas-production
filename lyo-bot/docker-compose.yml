@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  lyo-bot:
+    build: .
+    ports:
+      - "8001:8001"
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+
+  management:
+    build: .
+    command: uvicorn management.app:mgmt_app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: lyo_production
+      POSTGRES_USER: lyoadmin
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lyoadmin -d lyo_production"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

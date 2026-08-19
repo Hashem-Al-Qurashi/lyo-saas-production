@@ -3,6 +3,7 @@ AURA HAIR STUDIO - WhatsApp Bot with Calendar/Booking Integration
 OpenAI Tools API with strict mode for reliable function calling
 """
 import os
+import hmac
 import asyncio
 import logging
 import json
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import openai
+import chatwoot_bridge  # WhatsApp -> Chatwoot dashboard bridge
 
 # Google Calendar imports
 from google.oauth2 import service_account
@@ -93,6 +95,10 @@ else:
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "950083738197862")
 WHATSAPP_WEBHOOK_VERIFY_TOKEN = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "lyosaas2024")
+
+# Shared secret authenticating Chatwoot -> bot webhooks (Chatwoot custom webhooks
+# cannot send custom headers, so the secret rides in the URL as ?token=...).
+CHATWOOT_WEBHOOK_SECRET = os.getenv("CHATWOOT_WEBHOOK_SECRET", "")
 
 # Instagram Configuration
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
@@ -172,6 +178,19 @@ def combine_buffered_messages(messages: List[Dict]) -> str:
     logger.info(f"📦 Combined {len(messages)} messages into single input")
     return combined
 
+async def _chatwoot_push(direction: str, phone: str, content: str, name: str = None):
+    """Mirror a WhatsApp message into Chatwoot without blocking the event loop.
+    Failures are swallowed so the customer-facing flow is never affected."""
+    try:
+        loop = asyncio.get_event_loop()
+        if direction == "in":
+            await loop.run_in_executor(None, chatwoot_bridge.push_incoming, phone, content, name)
+        else:
+            await loop.run_in_executor(None, chatwoot_bridge.push_outgoing, phone, content)
+    except Exception as e:
+        logger.warning(f"Chatwoot push ({direction}) failed for {phone}: {e}")
+
+
 async def process_buffered_messages(phone: str):
     """Process all buffered messages for a user after timer expires"""
     try:
@@ -201,6 +220,15 @@ async def process_buffered_messages(phone: str):
         logger.info(f"⏰ Timer fired for {phone}. Processing {len(messages)} buffered message(s)")
         logger.info(f"📝 Combined input: {combined_text[:100]}...")
 
+        # Mirror the customer message into Chatwoot so agents see the conversation
+        await _chatwoot_push("in", phone, combined_text, contact_name)
+
+        # Human takeover: if an agent is handling this chat in Chatwoot, suspend
+        # the AI. The customer message is still mirrored above so the agent sees it.
+        if chatwoot_bridge.has_human_takeover(phone):
+            logger.info(f"🙋 Human takeover active for {phone} — skipping AI reply")
+            return
+
         # Extract business info for multi-tenant
         business = biz_context["business"] if biz_context else {}
         biz_id = business.get("id") if business else None
@@ -214,6 +242,9 @@ async def process_buffered_messages(phone: str):
         # Log response preview
         logger.info(f"📤 Response: {response[:100]}...")
         await send_whatsapp_message(phone, response, business)
+
+        # Mirror the bot's reply into Chatwoot
+        await _chatwoot_push("out", phone, response)
 
     except Exception as e:
         logger.error(f"❌ Error processing buffered messages for {phone}: {e}")
@@ -2013,6 +2044,35 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
                     )
                     count = cur.fetchone()[0]
                     available = count == 0
+                    # Validate time is within operator working hours
+                    if available and op_id is not None:
+                        try:
+                            _dow = datetime.strptime(date, "%Y-%m-%d").weekday()
+                            _op_obj = next((op for op in operators if op["id"] == op_id), None)
+                            if _op_obj:
+                                _op_h = _op_obj.get("hours", {}).get(_dow)
+                                if _op_h:
+                                    if not _op_h.get("is_working"):
+                                        conn.close()
+                                        return {
+                                            "success": True, "available": False,
+                                            "date": date, "time": time,
+                                            "reason": "operator_day_off",
+                                            "message": str(op_result.get("operator_name", "L'operatore")) + " non lavora in questo giorno.",
+                                        }
+                                    elif _op_h.get("start") and _op_h.get("end"):
+                                        if time < _op_h["start"] or time >= _op_h["end"]:
+                                            conn.close()
+                                            return {
+                                                "success": True, "available": False,
+                                                "date": date, "time": time,
+                                                "reason": "outside_operator_hours",
+                                                "operator_start": _op_h["start"],
+                                                "operator_end": _op_h["end"],
+                                                "message": str(op_result.get("operator_name", "L'operatore")) + " lavora dalle " + _op_h["start"] + " alle " + _op_h["end"] + " in questo giorno.",
+                                            }
+                        except Exception as _e_hours:
+                            logger.warning(f"operator hours check failed: {_e_hours}")
                 elif operators and not operator_name:
                     # No preference + operators exist: available if not ALL operators booked
                     # Bug #4: count operators with overlapping appts
@@ -2027,7 +2087,16 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
                     available = booked_count < len(operators)
                     _no_pref_operator = None
                     if available:
-                        _op_ids = [op["id"] for op in operators]
+                        # Fix: filter to treatment-eligible operators so assigned_operator
+                        # can actually perform the requested service (was returning Greta
+                        # for taglio_uomo because sort_order picks any free operator).
+                        _eligible_ids = [
+                            op["id"] for op in operators
+                            if not treatment_code
+                            or not op.get("treatments")
+                            or treatment_code in op.get("treatments", [])
+                        ] if treatment_code else [op["id"] for op in operators]
+                        _op_ids = _eligible_ids if _eligible_ids else [op["id"] for op in operators]
                         # Bug #4: NOT EXISTS interval overlap
                         cur.execute(
                             """SELECT o.id, o.display_name FROM operators o
@@ -3790,6 +3859,8 @@ async def startup():
     """Initialize on startup"""
     initialize_database()
     setup_reminder_scheduler()
+    # Durable human-takeover store (survives restarts). Falls back to in-memory.
+    chatwoot_bridge.init_takeover_store(get_db_connection)
     logger.info(f"🚀 {BUSINESS_NAME} WhatsApp + Instagram Bot started!")
 
 @app.get("/webhook")
@@ -3804,6 +3875,55 @@ async def verify_webhook(request: Request):
         return PlainTextResponse(challenge)
 
     return PlainTextResponse("Failed", status_code=403)
+
+@app.post("/webhook/chatwoot")
+async def chatwoot_webhook(request: Request):
+    """Inbound Chatwoot events: deliver human-agent replies to the customer over
+    WhatsApp and toggle the AI-suspend (human takeover) flag.
+
+    Auth: Chatwoot custom webhooks cannot add headers, so the shared secret is
+    passed as ?token=... in the configured webhook URL.
+    """
+    # --- authenticate (fail closed) ---
+    if not CHATWOOT_WEBHOOK_SECRET:
+        logger.error("CHATWOOT_WEBHOOK_SECRET not configured — rejecting webhook")
+        return JSONResponse({"status": "not_configured"}, status_code=503)
+    token = request.query_params.get("token", "")
+    if not hmac.compare_digest(token, CHATWOOT_WEBHOOK_SECRET):
+        return JSONResponse({"status": "forbidden"}, status_code=403)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"status": "bad_request"}, status_code=400)
+
+    decision = chatwoot_bridge.classify_webhook_event(payload)
+    action = decision.get("action")
+
+    if action == "forward":
+        phone = decision["phone"]
+        content = decision["content"]
+        chatwoot_bridge.mark_human_takeover(phone)
+        await send_whatsapp_message(phone, content)
+        logger.info(f"➡️ Forwarded agent reply to {phone} (takeover ON)")
+        return JSONResponse({"status": "forwarded"})
+
+    if action == "set_takeover":
+        phone = decision.get("phone")
+        if phone:
+            chatwoot_bridge.mark_human_takeover(phone)
+            logger.info(f"🏷️ bot_paused label detected — takeover ON for {phone}")
+        return JSONResponse({"status": "takeover_set"})
+
+    if action == "clear_takeover":
+        phone = decision.get("phone")
+        if phone:
+            chatwoot_bridge.clear_human_takeover(phone)
+            logger.info(f"✅ Conversation resolved — takeover OFF for {phone}")
+        return JSONResponse({"status": "takeover_cleared"})
+
+    return JSONResponse({"status": "ignored", "reason": decision.get("reason")})
+
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -3924,6 +4044,23 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
         if phone in chat_blocked:
             logger.info(f"🔒 Chat blocked for {phone}, ignoring message")
             return  # Don't respond to blocked chats
+
+        # Human takeover: an agent is handling this chat in Chatwoot -> suspend the
+        # AI for every reply path below. Still mirror the customer's message so the
+        # agent sees it in the dashboard.
+        if chatwoot_bridge.has_human_takeover(phone):
+            if message_type == "text":
+                mirror_text = message.get("text", {}).get("body", "")
+            elif message_type == "interactive":
+                interactive = message.get("interactive", {})
+                mirror_text = (interactive.get("button_reply", {}).get("title", "")
+                               or interactive.get("list_reply", {}).get("title", ""))
+            else:
+                mirror_text = f"[{message_type} message]"
+            if mirror_text:
+                await _chatwoot_push("in", phone, mirror_text, contact_name)
+            logger.info(f"🙋 Human takeover active for {phone} — AI suspended")
+            return
 
         if message_type == "text":
             text = message.get("text", {}).get("body", "")

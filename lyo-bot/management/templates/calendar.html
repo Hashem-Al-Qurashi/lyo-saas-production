@@ -1,0 +1,666 @@
+{% extends "base.html" %}
+{% block title %}Calendario - Lyo Virtual Assistant{% endblock %}
+{% block head %}
+<link href="https://cdn.jsdelivr.net/npm/fullcalendar-scheduler@6.1.11/index.global.min.css" rel="stylesheet">
+{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900 tracking-tight">Calendario</h1>
+        <p class="text-sm text-gray-500 mt-1">Vista giornaliera degli operatori</p>
+    </div>
+    <div class="flex items-center gap-3">
+        <button id="btn-new-appt" class="btn-primary text-sm flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+            Nuovo appuntamento
+        </button>
+    </div>
+</div>
+
+<div class="card p-0 sm:p-0">
+    <div id="calendar" class="p-3 sm:p-4"></div>
+</div>
+
+<!-- Detail Panel (slide-in from right) -->
+<div id="detail-panel" class="fixed top-0 right-0 h-full w-80 bg-white shadow-2xl z-50 transform translate-x-full transition-transform duration-300 ease-in-out flex flex-col">
+    <div class="flex items-center justify-between p-4 border-b border-gray-100">
+        <h2 class="text-base font-semibold text-gray-900">Dettaglio appuntamento</h2>
+        <button id="panel-close" class="text-gray-400 hover:text-gray-600 p-1 rounded">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+    </div>
+    <div class="flex-1 overflow-y-auto p-4 space-y-4">
+        <div>
+            <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Cliente</p>
+            <p id="pd-name" class="font-semibold text-gray-900 text-sm"></p>
+            <p id="pd-phone" class="text-gray-500 text-sm mt-0.5"></p>
+        </div>
+        <div>
+            <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Trattamento</p>
+            <p id="pd-treatment" class="text-gray-800 text-sm"></p>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+            <div>
+                <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Orario</p>
+                <p id="pd-time" class="text-gray-800 text-sm font-medium"></p>
+            </div>
+            <div>
+                <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Prezzo</p>
+                <p id="pd-price" class="text-gray-800 text-sm font-medium"></p>
+            </div>
+        </div>
+        <div>
+            <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Operatore</p>
+            <p id="pd-operator" class="text-gray-800 text-sm"></p>
+        </div>
+        <div>
+            <p class="text-xs text-gray-400 uppercase tracking-wide mb-1">Stato</p>
+            <span id="pd-status-badge" class="inline-block px-2 py-0.5 rounded-full text-xs font-medium"></span>
+        </div>
+    </div>
+    <!-- Action buttons -->
+    <div class="p-4 border-t border-gray-100 flex gap-2">
+        <button id="pd-cancel-btn" class="flex-1 text-sm font-medium px-3 py-2 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition-colors">
+            Cancella appuntamento
+        </button>
+    </div>
+</div>
+
+<!-- Overlay for detail panel -->
+<div id="panel-overlay" class="fixed inset-0 bg-black/20 z-40 hidden"></div>
+
+<!-- New Appointment Modal -->
+<div id="new-appt-modal" class="fixed inset-0 bg-black/40 z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md">
+        <div class="flex items-center justify-between p-5 border-b border-gray-100">
+            <h2 class="text-base font-semibold text-gray-900">Nuovo appuntamento</h2>
+            <button id="modal-close" class="text-gray-400 hover:text-gray-600 p-1 rounded">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <form id="new-appt-form" class="p-5 space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 mb-1">Data <span class="text-red-500">*</span></label>
+                    <input id="na-date" type="date" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 mb-1">Orario <span class="text-red-500">*</span></label>
+                    <input id="na-time" type="time" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+                </div>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Trattamento <span class="text-red-500">*</span></label>
+                <select id="na-treatment" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+                    <option value="">Seleziona trattamento...</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Operatore</label>
+                <select id="na-operator" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+                    <option value="">Non assegnato</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Nome cliente <span class="text-red-500">*</span></label>
+                <input id="na-name" type="text" required placeholder="Es. Marco Rossi" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-700 mb-1">Telefono <span class="text-red-500">*</span></label>
+                <input id="na-phone" type="tel" required placeholder="Es. 3901234567" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0084d2]">
+            </div>
+            <div id="na-error" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+            <div class="flex gap-3 pt-1">
+                <button type="button" id="modal-cancel-btn" class="flex-1 btn-secondary text-sm">Annulla</button>
+                <button type="submit" id="na-submit" class="flex-1 btn-primary text-sm">Prenota</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar-scheduler@6.1.11/index.global.min.js"></script>
+
+<script>
+(function() {
+    var csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+    var calendarEl = document.getElementById('calendar');
+    var isDragging = false;
+    var pendingDropFetch = 0;  // counts in-flight drag-drop fetches
+    var refreshInterval = null;
+    var treatmentData = [];
+    var operatorData = [];
+
+    // Apple system color palette — assigned round-robin to operators
+    var APPLE_PALETTE = ['#007AFF','#FF3B30','#FF9500','#34C759','#5856D6','#FF2D55','#5AC8FA','#AF52DE','#FF6B35','#00C7BE'];
+    var OPERATOR_COLOR_MAP = {};  // operator id → hex color
+
+    function hexToRgba(hex, alpha) {
+        var r = parseInt(hex.slice(1,3), 16);
+        var g = parseInt(hex.slice(3,5), 16);
+        var b = parseInt(hex.slice(5,7), 16);
+        return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+    }
+
+    // --- Status badge helpers ---
+    var STATUS_LABELS = {confirmed: 'Confermato', completed: 'Completato', cancelled: 'Cancellato'};
+    var STATUS_CLASSES = {
+        confirmed: 'bg-green-100 text-green-800',
+        completed: 'bg-blue-100 text-blue-800',
+        cancelled: 'bg-red-100 text-red-800',
+    };
+
+    // --- Detail panel ---
+    var panel = document.getElementById('detail-panel');
+    var overlay = document.getElementById('panel-overlay');
+    var currentPanelEventId = null;  // tracks which appointment is open
+
+    function openPanel(evt) {
+        currentPanelEventId = evt.id;
+        var props = evt.extendedProps;
+        document.getElementById('pd-name').textContent = props.customerName || evt.title.split('\n')[0] || '-';
+        document.getElementById('pd-phone').textContent = props.phone || '-';
+        document.getElementById('pd-treatment').textContent = props.treatmentName || evt.title.split('\n')[1] || '-';
+        document.getElementById('pd-operator').textContent = props.operator || 'Non assegnato';
+        document.getElementById('pd-price').textContent = props.price ? '€' + props.price.toFixed(2) : '-';
+
+        // Use startStr/endStr (FullCalendar timezone-aware ISO strings) to avoid toLocaleTimeString TZ bugs
+        var timeStr = evt.startStr ? evt.startStr.slice(11, 16) : '-';
+        if (evt.endStr) timeStr += ' – ' + evt.endStr.slice(11, 16);
+        document.getElementById('pd-time').textContent = timeStr;
+
+        var statusBadge = document.getElementById('pd-status-badge');
+        var status = props.status || 'confirmed';
+        statusBadge.textContent = STATUS_LABELS[status] || status;
+        statusBadge.className = 'inline-block px-2 py-0.5 rounded-full text-xs font-medium ' + (STATUS_CLASSES[status] || 'bg-gray-100 text-gray-800');
+
+        panel.classList.remove('translate-x-full');
+        overlay.classList.remove('hidden');
+    }
+
+    function closePanel() {
+        panel.classList.add('translate-x-full');
+        overlay.classList.add('hidden');
+    }
+
+    document.getElementById('panel-close').addEventListener('click', closePanel);
+    overlay.addEventListener('click', closePanel);
+
+    document.getElementById('pd-cancel-btn').addEventListener('click', function() {
+        if (!currentPanelEventId) return;
+        if (!confirm('Vuoi davvero cancellare questo appuntamento?')) return;
+        var apptId = currentPanelEventId;
+        fetch('/manage/api/appointments/' + apptId + '/cancel', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+        })
+        .then(function(resp) {
+            if (!resp.ok) return resp.json().then(function(d) { throw new Error(d.error || 'Errore'); });
+            return resp.json();
+        })
+        .then(function() {
+            closePanel();
+            calendar.refetchEvents();
+            showToast('Appuntamento cancellato', 'success');
+        })
+        .catch(function(err) {
+            showToast('Errore: ' + err.message, 'error');
+        });
+    });
+
+    // --- New appointment modal ---
+    var modal = document.getElementById('new-appt-modal');
+
+    function openModal(dateStr, timeStr, operatorId) {
+        document.getElementById('na-date').value = dateStr || '';
+        document.getElementById('na-time').value = timeStr || '';
+        document.getElementById('na-name').value = '';
+        document.getElementById('na-phone').value = '';
+        document.getElementById('na-error').classList.add('hidden');
+        // Pre-select operator
+        var opSel = document.getElementById('na-operator');
+        opSel.value = operatorId && operatorId !== 'unassigned' ? String(operatorId) : '';
+        modal.classList.remove('hidden');
+    }
+
+    function closeModal() {
+        modal.classList.add('hidden');
+    }
+
+    document.getElementById('modal-close').addEventListener('click', closeModal);
+    document.getElementById('modal-cancel-btn').addEventListener('click', closeModal);
+    document.getElementById('btn-new-appt').addEventListener('click', function() {
+        openModal('', '', null);
+    });
+    modal.addEventListener('click', function(e) {
+        if (e.target === modal) closeModal();
+    });
+
+    // Load treatments and operators for the modal
+    function loadModalData() {
+        fetch('/manage/api/treatments')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                treatmentData = data;
+                var sel = document.getElementById('na-treatment');
+                data.forEach(function(t) {
+                    var opt = document.createElement('option');
+                    opt.value = t.id;
+                    opt.textContent = t.name + ' (' + t.duration + 'min – €' + t.price.toFixed(2) + ')';
+                    sel.appendChild(opt);
+                });
+            });
+
+        fetch('/manage/api/operators')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                operatorData = data;
+                var sel = document.getElementById('na-operator');
+                data.forEach(function(op) {
+                    if (op.id === 'unassigned') return;
+                    var opt = document.createElement('option');
+                    opt.value = op.id;
+                    opt.textContent = op.title;
+                    sel.appendChild(opt);
+                });
+            });
+    }
+    loadModalData();
+
+    // Form submit
+    document.getElementById('new-appt-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        var errEl = document.getElementById('na-error');
+        errEl.classList.add('hidden');
+        var submitBtn = document.getElementById('na-submit');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Salvataggio...';
+
+        var treatId = parseInt(document.getElementById('na-treatment').value);
+        var opVal = document.getElementById('na-operator').value;
+        var opId = opVal ? parseInt(opVal) : null;
+
+        fetch('/manage/api/appointments', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+            body: JSON.stringify({
+                customer_name: document.getElementById('na-name').value.trim(),
+                customer_phone: document.getElementById('na-phone').value.trim(),
+                treatment_id: treatId,
+                operator_id: opId,
+                appointment_date: document.getElementById('na-date').value,
+                appointment_time: document.getElementById('na-time').value,
+            })
+        })
+        .then(function(resp) {
+            if (!resp.ok) return resp.json().then(function(d) { throw new Error(d.error || 'Errore'); });
+            return resp.json();
+        })
+        .then(function() {
+            closeModal();
+            calendar.refetchEvents();
+            showToast('Appuntamento creato', 'success');
+        })
+        .catch(function(err) {
+            errEl.textContent = err.message;
+            errEl.classList.remove('hidden');
+        })
+        .finally(function() {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Prenota';
+        });
+    });
+
+    // --- FullCalendar ---
+    var calendar = new FullCalendar.Calendar(calendarEl, {
+        schedulerLicenseKey: 'GPL-My-Project-Is-Open-Source',
+        initialView: 'resourceTimeGridDay',
+        headerToolbar: {
+            left: 'prev,next today',
+            center: 'title',
+            right: 'resourceTimeGridDay,timeGridWeek,dayGridMonth'
+        },
+        locale: 'it',
+        timeZone: 'Europe/Rome',
+        slotMinTime: '08:00:00',
+        slotMaxTime: '21:00:00',
+        slotDuration: '00:15:00',
+        slotLabelFormat: {hour: 'numeric', minute: '2-digit', hour12: false},
+        allDaySlot: false,
+        editable: true,
+        eventDurationEditable: false,
+        height: 'calc(100vh - 200px)',
+        expandRows: true,
+        stickyHeaderDates: true,
+
+        resources: function(fetchInfo, successCallback, failureCallback) {
+            var dateStr = calendar ? calendar.getDate().toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+            fetch('/manage/api/operators?date=' + dateStr)
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var colorIdx = 0;
+                    data.forEach(function(res) {
+                        if (res.id === 'unassigned') {
+                            res.eventColor = '#8E8E93';
+                            OPERATOR_COLOR_MAP['unassigned'] = '#8E8E93';
+                        } else {
+                            var col = APPLE_PALETTE[colorIdx % APPLE_PALETTE.length];
+                            res.eventColor = col;
+                            OPERATOR_COLOR_MAP[String(res.id)] = col;
+                            colorIdx++;
+                        }
+                    });
+                    successCallback(data);
+                })
+                .catch(failureCallback);
+        },
+        events: {url: '/manage/api/appointments', method: 'GET'},
+
+        // "Non assegnato" is now conditionally returned by /api/operators only when
+        // unassigned appointments exist on that date — no DOM hacks, no render loops.
+
+        eventDrop: function(info) {
+            var evt = info.event;
+            var newResource = evt.getResources()[0];
+            // Use startStr (FullCalendar timezone-aware ISO string) instead of toTimeString()
+            var newDate = evt.startStr.slice(0, 10);
+            var newTime = evt.startStr.slice(11, 16);
+            // null if dragged to "unassigned", integer if real operator
+            var newOpId = (newResource && newResource.id !== 'unassigned')
+                ? parseInt(newResource.id)
+                : null;
+
+            pendingDropFetch++;
+            fetch('/manage/api/appointments/' + evt.id + '/move', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+                body: JSON.stringify({
+                    new_date: newDate,
+                    new_time: newTime,
+                    new_operator_id: newOpId,
+                })
+            })
+            .then(function(resp) {
+                if (!resp.ok) {
+                    info.revert();
+                    showToast('Errore nello spostamento', 'error');
+                } else {
+                    showToast('Appuntamento spostato', 'success');
+                    calendar.refetchEvents();
+                }
+            })
+            .catch(function() {
+                info.revert();
+                showToast('Errore di rete', 'error');
+            })
+            .finally(function() {
+                pendingDropFetch--;
+            });
+        },
+
+        eventClick: function(info) {
+            openPanel(info.event);
+        },
+
+        dateClick: function(info) {
+            // In month view, drill into the clicked day
+            if (info.view.type === 'dayGridMonth') {
+                calendar.gotoDate(info.dateStr);
+                calendar.changeView('resourceTimeGridDay');
+                return;
+            }
+            // Only trigger modal on day view to avoid confusing multi-day clicks in week view
+            if (info.view.type !== 'resourceTimeGridDay') return;
+            var timeStr = info.dateStr.slice(11, 16);
+            var dateStr = info.dateStr.slice(0, 10);
+            var resourceId = info.resource ? info.resource.id : null;
+            openModal(dateStr, timeStr, resourceId);
+        },
+
+        resourceLabelDidMount: function(info) {
+            var col = OPERATOR_COLOR_MAP[String(info.resource.id)] || '#8E8E93';
+            var cushion = info.el.querySelector('.fc-col-header-cell-cushion');
+            if (cushion) {
+                var dot = document.createElement('span');
+                dot.style.cssText = 'display:inline-block;width:8px;height:8px;border-radius:50%;background:' + col + ';flex-shrink:0;';
+                cushion.insertBefore(dot, cushion.firstChild);
+            }
+        },
+
+        eventDidMount: function(info) {
+            info.el.addEventListener('mousedown', function() { isDragging = true; });
+            var resources = info.event.getResources();
+            var opId = resources.length > 0 ? String(resources[0].id) : null;
+            var col = (opId && OPERATOR_COLOR_MAP[opId]) ? OPERATOR_COLOR_MAP[opId] : '#007AFF';
+            // Apple Calendar style: light pastel fill + left accent strip + colored text
+            info.el.style.backgroundColor = hexToRgba(col, 0.15);
+            info.el.style.borderStyle = 'solid';
+            info.el.style.borderWidth = '0 0 0 3px';
+            info.el.style.borderColor = col;
+            info.el.style.borderRadius = '0 4px 4px 0';
+            info.el.style.color = col;
+            // White outline separates adjacent overlapping events
+            info.el.style.boxShadow = 'inset 0 0 0 1px rgba(255,255,255,0.6)';
+            // FC's .fc-event-main is styled white internally — force color on inner elements
+            var innerEls = info.el.querySelectorAll('.fc-event-main, .fc-event-title, .fc-event-time');
+            innerEls.forEach(function(el) { el.style.color = col; });
+        },
+
+        datesSet: function() {
+            // Refetch operators when date changes so non-working operators are hidden
+            calendar.refetchResources();
+        },
+
+        windowResize: function() {
+            // Debounced — FullCalendar calls this on every pixel of resize
+            clearTimeout(calendar._resizeTimer);
+            calendar._resizeTimer = setTimeout(function() {
+                if (window.innerWidth < 768) {
+                    calendar.changeView('listDay');
+                } else if (calendar.view.type === 'listDay') {
+                    calendar.changeView('resourceTimeGridDay');
+                }
+            }, 150);
+        }
+    });
+
+    // Expose globally for debugging
+    window._calendar = calendar;
+
+    calendar.render();
+    if (window.innerWidth < 768) calendar.changeView('listDay');
+
+    // Reset drag flag on mouseup/touchend — also use a safety timeout so a
+    // missed mouseup (released outside browser window) doesn't freeze auto-refresh.
+    var dragResetTimer = null;
+    function resetDrag() {
+        isDragging = false;
+        clearTimeout(dragResetTimer);
+    }
+    document.addEventListener('mouseup', resetDrag);
+    document.addEventListener('touchend', resetDrag);
+    document.addEventListener('mousemove', function() {
+        // If mouse moves but isDragging is stuck, reset after 5s of inactivity
+        if (isDragging) {
+            clearTimeout(dragResetTimer);
+            dragResetTimer = setTimeout(resetDrag, 5000);
+        }
+    });
+
+    // Auto-refresh every 30s — skip if dragging or a drop fetch is in-flight
+    refreshInterval = setInterval(function() {
+        if (!isDragging && pendingDropFetch === 0 && modal.classList.contains('hidden')) {
+            calendar.refetchEvents();
+        }
+    }, 30000);
+
+    // Clear interval on page unload so it doesn't fire after navigation
+    window.addEventListener('beforeunload', function() {
+        clearInterval(refreshInterval);
+    });
+
+})();
+</script>
+
+<style>
+    /* ── Apple-quality calendar design ─────────────────────────────── */
+
+    /* Buttons — Apple system blue */
+    .fc .fc-button-primary {
+        background: #007AFF !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-size: 0.8125rem !important;
+        font-weight: 500 !important;
+        padding: 0.375rem 0.875rem !important;
+        box-shadow: none !important;
+        letter-spacing: -0.01em !important;
+        transition: opacity 0.12s ease !important;
+    }
+    .fc .fc-button-primary:hover:not(:disabled) {
+        background: #0071E3 !important;
+        opacity: 0.9 !important;
+    }
+    .fc .fc-button-primary:not(:disabled).fc-button-active,
+    .fc .fc-button-primary:not(:disabled):active {
+        background: #0058C4 !important;
+        opacity: 1 !important;
+    }
+    .fc .fc-button-primary:disabled {
+        opacity: 0.4 !important;
+    }
+    .fc .fc-today-button { text-transform: capitalize !important; }
+
+    /* Events — Apple Calendar style: pastel fill + left accent + colored text */
+    .fc-event {
+        cursor: pointer;
+        border-radius: 0 4px 4px 0 !important;
+        font-size: 0.6875rem !important;
+        font-weight: 500 !important;
+        padding: 2px 6px 2px 5px !important;
+        box-shadow: none !important;
+        transition: opacity 0.1s ease !important;
+    }
+    .fc-event:hover {
+        opacity: 0.82 !important;
+        filter: none !important;
+    }
+    .fc-event .fc-event-title {
+        font-weight: 600;
+        font-size: 0.6875rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: inherit;
+    }
+    .fc-event .fc-event-time {
+        font-size: 0.625rem;
+        font-weight: 500;
+        color: inherit;
+        opacity: 0.9;
+    }
+
+    /* Column headers — white, clean, name with colored identity dot */
+    .fc .fc-col-header-cell {
+        background-color: #ffffff !important;
+        border-bottom: 1.5px solid rgba(0,0,0,0.08) !important;
+    }
+    .fc .fc-col-header-cell-cushion {
+        font-size: 0.8125rem !important;
+        font-weight: 600 !important;
+        color: #1C1C1E !important;
+        text-decoration: none !important;
+        padding: 10px 10px !important;
+        letter-spacing: -0.015em !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 6px !important;
+    }
+
+    /* Time slots */
+    .fc .fc-timegrid-slot { height: 2.25em; }
+    .fc .fc-timegrid-slot-label-cushion {
+        font-size: 0.6875rem !important;
+        color: #8E8E93 !important;
+        font-weight: 400 !important;
+        letter-spacing: 0 !important;
+    }
+    .fc .fc-timegrid-slot-minor {
+        border-top-style: dashed !important;
+        border-color: rgba(0,0,0,0.04) !important;
+    }
+
+    /* Grid lines — barely there */
+    .fc-theme-standard td, .fc-theme-standard th {
+        border-color: rgba(0,0,0,0.07) !important;
+    }
+    .fc-theme-standard .fc-scrollgrid {
+        border-color: rgba(0,0,0,0.1) !important;
+    }
+
+    /* Today column — Apple blue whisper */
+    .fc .fc-timegrid-col.fc-day-today,
+    .fc .fc-daygrid-day.fc-day-today {
+        background: rgba(0,122,255,0.05) !important;
+    }
+
+    /* Now indicator — Apple red */
+    .fc .fc-timegrid-now-indicator-line {
+        border-color: #FF3B30 !important;
+        border-width: 2px !important;
+    }
+    .fc .fc-timegrid-now-indicator-arrow {
+        border-top-color: #FF3B30 !important;
+        border-bottom-color: #FF3B30 !important;
+    }
+
+    /* Day numbers in month view */
+    .fc .fc-daygrid-day-number {
+        font-size: 0.8125rem !important;
+        font-weight: 400 !important;
+        color: #1C1C1E !important;
+        text-decoration: none !important;
+    }
+    .fc .fc-daygrid-day.fc-day-today .fc-daygrid-day-number {
+        background: #007AFF;
+        color: #fff;
+        border-radius: 50%;
+        width: 1.625rem;
+        height: 1.625rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+    }
+
+    /* Toolbar title */
+    .fc .fc-toolbar-title {
+        font-size: 1.0625rem !important;
+        font-weight: 600 !important;
+        color: #1C1C1E !important;
+        letter-spacing: -0.02em !important;
+    }
+
+    /* "Non assegnato" — hatched, clearly different */
+    .fc-col-header-cell[data-resource-id="unassigned"] .fc-col-header-cell-cushion {
+        color: #8E8E93 !important;
+        font-weight: 400 !important;
+        font-style: italic !important;
+    }
+    .fc-timegrid-col[data-resource-id="unassigned"] {
+        background: repeating-linear-gradient(
+            -45deg,
+            #FAFAFA 0px, #FAFAFA 5px,
+            #F2F2F7 5px, #F2F2F7 10px
+        ) !important;
+    }
+
+    /* Resource area label column */
+    .fc-resource-area .fc-scroller { background: #fff; }
+    .fc .fc-resource-area-header { background: #fff !important; }
+
+    /* List view */
+    .fc .fc-list-event:hover td { background: #F2F2F7 !important; }
+    .fc .fc-list-day-cushion { background: #F2F2F7 !important; font-size: 0.8125rem; }
+    .fc .fc-list-event-dot { border-color: transparent !important; }
+</style>
+{% endblock %}

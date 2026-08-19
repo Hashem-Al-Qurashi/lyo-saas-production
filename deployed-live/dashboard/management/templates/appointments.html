@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Appuntamenti - Lyo Virtual Assistant{% endblock %}
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900 tracking-tight">Appuntamenti</h1>
+    <p class="text-sm text-gray-500 mt-1">Visualizza e gestisci le prenotazioni dei clienti</p>
+</div>
+
+<!-- Date Filter -->
+<div class="card mb-6">
+    <form method="get" action="/manage/appointments/" class="flex flex-wrap items-end gap-4">
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">Data</label>
+            <input type="date" name="filter_date" value="{{ selected_date }}" class="form-input">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">Stato</label>
+            <select name="status" class="form-input">
+                <option value="all" {% if selected_status == 'all' %}selected{% endif %}>Tutti</option>
+                <option value="confirmed" {% if selected_status == 'confirmed' %}selected{% endif %}>Confermati</option>
+                <option value="cancelled" {% if selected_status == 'cancelled' %}selected{% endif %}>Cancellati</option>
+                <option value="completed" {% if selected_status == 'completed' %}selected{% endif %}>Completati</option>
+            </select>
+        </div>
+        <div>
+            <button type="submit" class="btn-primary">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/></svg>
+                Filtra
+            </button>
+        </div>
+    </form>
+</div>
+
+<!-- Counts -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <div class="card text-center">
+        <div class="w-10 h-10 bg-gray-50 rounded-xl flex items-center justify-center mx-auto mb-2">
+            <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+        </div>
+        <div class="text-2xl font-bold text-gray-900">{{ counts.total }}</div>
+        <div class="text-xs text-gray-500 font-medium mt-0.5">Totali</div>
+    </div>
+    <div class="card text-center">
+        <div class="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center mx-auto mb-2">
+            <svg class="w-5 h-5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        </div>
+        <div class="text-2xl font-bold text-emerald-600">{{ counts.confirmed }}</div>
+        <div class="text-xs text-gray-500 font-medium mt-0.5">Confermati</div>
+    </div>
+    <div class="card text-center">
+        <div class="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center mx-auto mb-2">
+            <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+        </div>
+        <div class="text-2xl font-bold text-blue-600">{{ counts.completed }}</div>
+        <div class="text-xs text-gray-500 font-medium mt-0.5">Completati</div>
+    </div>
+    <div class="card text-center">
+        <div class="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center mx-auto mb-2">
+            <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </div>
+        <div class="text-2xl font-bold text-red-600">{{ counts.cancelled }}</div>
+        <div class="text-xs text-gray-500 font-medium mt-0.5">Cancellati</div>
+    </div>
+</div>
+
+<!-- Appointments Table -->
+<div class="card p-0 overflow-hidden">
+    {% if appointments %}
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Orario</th>
+                <th>Cliente</th>
+                <th>Telefono</th>
+                <th>Trattamento</th>
+                <th>Operatore</th>
+                <th>Durata</th>
+                <th>Stato</th>
+                <th>Azioni</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for a in appointments %}
+            <tr>
+                <td class="font-medium text-gray-900">{{ a[7] }}</td>
+                <td>
+                    <div class="flex items-center gap-2">
+                        <div class="w-7 h-7 bg-brand-light text-brand rounded-full flex items-center justify-center text-xs font-semibold">
+                            {{ a[1][0]|upper if a[1] else '?' }}
+                        </div>
+                        <span>{{ a[1] }}</span>
+                    </div>
+                </td>
+                <td class="text-gray-500">{{ a[2] }}</td>
+                <td>{{ a[3] or a[4] }}</td>
+                <td class="text-gray-500">{{ a[5] or '-' }}</td>
+                <td>
+                    <span class="inline-flex items-center gap-1 text-gray-600">
+                        <svg class="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        {{ a[8] }} min
+                    </span>
+                </td>
+                <td>
+                    {% if a[9] == 'confirmed' %}
+                    <span class="badge badge-green">Confermato</span>
+                    {% elif a[9] == 'cancelled' %}
+                    <span class="badge badge-red">Cancellato</span>
+                    {% elif a[9] == 'completed' %}
+                    <span class="badge badge-blue">Completato</span>
+                    {% else %}
+                    <span class="badge badge-gray">{{ a[9] }}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if a[9] == 'confirmed' %}
+                    <div class="flex items-center gap-2">
+                        <form method="post" action="/manage/appointments/{{ a[0] }}/complete" class="inline">
+                            <button type="submit" class="action-link action-edit">Completa</button>
+                        </form>
+                        <form method="post" action="/manage/appointments/{{ a[0] }}/cancel" class="inline">
+                            <button type="submit" class="action-link action-delete">Cancella</button>
+                        </form>
+                    </div>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="p-12 text-center">
+        <svg class="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+        <p class="text-gray-500 text-sm">Nessun appuntamento per questa data.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

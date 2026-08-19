@@ -3,6 +3,7 @@ AURA HAIR STUDIO - WhatsApp Bot with Calendar/Booking Integration
 OpenAI Tools API with strict mode for reliable function calling
 """
 import os
+import hmac
 import asyncio
 import logging
 import json
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import openai
+import chatwoot_bridge  # WhatsApp -> Chatwoot dashboard bridge
 
 # Google Calendar imports
 from google.oauth2 import service_account
@@ -37,6 +39,7 @@ from business_context import (
     lookup_treatment, lookup_business_policy, lookup_closure_dates,
     lookup_faq, lookup_operator_for_treatment, get_available_treatments,
     load_business_by_phone_number_id,
+    load_business_by_instagram_page_id,
     load_services,
     load_business_hours,
     load_closures,
@@ -84,15 +87,25 @@ logger.info(f"OpenAI SDK version: {openai.__version__} (major: {OPENAI_SDK_VERSI
 if OPENAI_SDK_VERSION >= 1:
     # New SDK v1.0+ syntax
     openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    _OAIRateLimitError = openai.RateLimitError
+    _OAITimeoutError = openai.APITimeoutError
+    _OAIConnectionError = openai.APIConnectionError
 else:
     # Old SDK v0.x syntax
     openai.api_key = OPENAI_API_KEY
     openai_client = None  # Use module-level calls for old SDK
+    _OAIRateLimitError = openai.error.RateLimitError
+    _OAITimeoutError = openai.error.Timeout
+    _OAIConnectionError = openai.error.APIConnectionError
 
 # WhatsApp Configuration - MUST be set via environment variables
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "950083738197862")
 WHATSAPP_WEBHOOK_VERIFY_TOKEN = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "lyosaas2024")
+
+# Shared secret authenticating Chatwoot -> bot webhooks (Chatwoot custom webhooks
+# cannot send custom headers, so the secret rides in the URL as ?token=...).
+CHATWOOT_WEBHOOK_SECRET = os.getenv("CHATWOOT_WEBHOOK_SECRET", "")
 
 # Instagram Configuration
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
@@ -172,6 +185,19 @@ def combine_buffered_messages(messages: List[Dict]) -> str:
     logger.info(f"📦 Combined {len(messages)} messages into single input")
     return combined
 
+async def _chatwoot_push(direction: str, phone: str, content: str, name: str = None):
+    """Mirror a WhatsApp message into Chatwoot without blocking the event loop.
+    Failures are swallowed so the customer-facing flow is never affected."""
+    try:
+        loop = asyncio.get_event_loop()
+        if direction == "in":
+            await loop.run_in_executor(None, chatwoot_bridge.push_incoming, phone, content, name)
+        else:
+            await loop.run_in_executor(None, chatwoot_bridge.push_outgoing, phone, content)
+    except Exception as e:
+        logger.warning(f"Chatwoot push ({direction}) failed for {phone}: {e}")
+
+
 async def process_buffered_messages(phone: str):
     """Process all buffered messages for a user after timer expires"""
     try:
@@ -201,6 +227,15 @@ async def process_buffered_messages(phone: str):
         logger.info(f"⏰ Timer fired for {phone}. Processing {len(messages)} buffered message(s)")
         logger.info(f"📝 Combined input: {combined_text[:100]}...")
 
+        # Mirror the customer message into Chatwoot so agents see the conversation
+        await _chatwoot_push("in", phone, combined_text, contact_name)
+
+        # Human takeover: if an agent is handling this chat in Chatwoot, suspend
+        # the AI. The customer message is still mirrored above so the agent sees it.
+        if chatwoot_bridge.has_human_takeover(phone):
+            logger.info(f"🙋 Human takeover active for {phone} — skipping AI reply")
+            return
+
         # Extract business info for multi-tenant
         business = biz_context["business"] if biz_context else {}
         biz_id = business.get("id") if business else None
@@ -214,6 +249,9 @@ async def process_buffered_messages(phone: str):
         # Log response preview
         logger.info(f"📤 Response: {response[:100]}...")
         await send_whatsapp_message(phone, response, business)
+
+        # Mirror the bot's reply into Chatwoot
+        await _chatwoot_push("out", phone, response)
 
     except Exception as e:
         logger.error(f"❌ Error processing buffered messages for {phone}: {e}")
@@ -979,24 +1017,42 @@ def get_tomorrow_appointments(business_id: int = None) -> List[Dict]:
         return []
 
 
-def get_unconfirmed_appointments() -> List[Dict]:
-    """Get appointments where reminder was sent but not confirmed"""
+def get_unconfirmed_appointments(business_id: int = None) -> List[Dict]:
+    """Get tomorrow's appointments where reminder was sent but not confirmed.
+
+    When business_id is given, queries the multi-tenant `appointments` table.
+    Excludes auto-addon children (parent reminder covers them).
+    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
         tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        cur.execute("""
-            SELECT id, customer_phone, customer_name, service_type,
-                   appointment_date, appointment_time, price
-            FROM salon_appointments
-            WHERE appointment_date = %s
-              AND status = 'confirmed'
-              AND reminder_sent_at IS NOT NULL
-              AND reminder_confirmed = FALSE
-            ORDER BY appointment_time
-        """, (tomorrow,))
+        if business_id is not None:
+            cur.execute("""
+                SELECT id, customer_phone, customer_name, treatment_name,
+                       appointment_date, appointment_time, price
+                FROM appointments
+                WHERE business_id = %s
+                  AND appointment_date = %s
+                  AND status = 'confirmed'
+                  AND reminder_sent_at IS NOT NULL
+                  AND reminder_confirmed = FALSE
+                  AND COALESCE(is_auto_addon, FALSE) = FALSE
+                ORDER BY appointment_time
+            """, (business_id, tomorrow))
+        else:
+            cur.execute("""
+                SELECT id, customer_phone, customer_name, service_type,
+                       appointment_date, appointment_time, price
+                FROM salon_appointments
+                WHERE appointment_date = %s
+                  AND status = 'confirmed'
+                  AND reminder_sent_at IS NOT NULL
+                  AND reminder_confirmed = FALSE
+                ORDER BY appointment_time
+            """, (tomorrow,))
 
         appointments = []
         for row in cur.fetchall():
@@ -1260,43 +1316,68 @@ Grazie!"""
 
 
 async def check_unconfirmed_and_notify():
-    """Disabled per Bug #16 — unconfirmed appointment emails turned off."""
-    logger.info("📧 check_unconfirmed_and_notify: disabled (Bug #16), skipping.")
-    return
+    """Email salon owners about tomorrow's unconfirmed appointments (runs at 18:00)."""
+    logger.info("📧 check_unconfirmed_and_notify: starting...")
 
-    unconfirmed = get_unconfirmed_appointments()
-    logger.info(f"📋 Found {len(unconfirmed)} unconfirmed appointments")
-
-    if not unconfirmed:
-        logger.info("✅ All appointments confirmed! No email needed.")
-        return
-
-    # Build email body
     tomorrow = (datetime.now(ITALY_TZ) + timedelta(days=1)).strftime("%d/%m/%Y")
 
+    # Load all active businesses
+    businesses = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, name, owner_email FROM businesses WHERE status = 'active'"""
+        )
+        businesses = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ check_unconfirmed_and_notify: failed to load businesses: {e}")
+
+    if not businesses:
+        # Legacy single-tenant fallback
+        unconfirmed = get_unconfirmed_appointments()
+        logger.info(f"📋 Found {len(unconfirmed)} unconfirmed appointments (legacy)")
+        if not unconfirmed:
+            logger.info("✅ All appointments confirmed (legacy). No email needed.")
+            return
+        _send_unconfirmed_email(unconfirmed, OWNER_EMAIL, tomorrow, "Aura Hair Studio")
+        return
+
+    for biz_id, biz_name, biz_owner_email in businesses:
+        unconfirmed = get_unconfirmed_appointments(business_id=biz_id)
+        logger.info(f"📋 [{biz_name}] Found {len(unconfirmed)} unconfirmed appointments")
+        if not unconfirmed:
+            logger.info(f"✅ [{biz_name}] All confirmed. No email needed.")
+            continue
+        recipient = biz_owner_email or OWNER_EMAIL
+        _send_unconfirmed_email(unconfirmed, recipient, tomorrow, biz_name)
+
+
+def _send_unconfirmed_email(unconfirmed: List[Dict], recipient: str, tomorrow_label: str, salon_name: str):
+    """Build and send the unconfirmed-appointments email to the salon owner."""
     email_body = f"""Ciao,
 
-I seguenti appuntamenti per domani ({tomorrow}) NON sono stati confermati:
+I seguenti appuntamenti per domani ({tomorrow_label}) NON sono stati confermati:
 
 """
     for apt in unconfirmed:
         time_str = apt["time"].strftime("%H:%M") if hasattr(apt["time"], 'strftime') else str(apt["time"])[:5]
         email_body += f"• {apt['name']} - {apt['service']} alle {time_str} (Tel: {apt['phone']})\n"
 
-    email_body += """
+    email_body += f"""
 Puoi decidere se mantenerli o cancellarli.
 
 Saluti,
-Sistema Aura Hair Studio"""
+Sistema {salon_name}"""
 
-    # Send email
-    subject = f"⚠️ Appuntamenti non confermati per domani ({tomorrow})"
-    success = send_email(OWNER_EMAIL, subject, email_body)
-
+    subject = f"⚠️ Appuntamenti non confermati per domani ({tomorrow_label})"
+    success = send_email(recipient, subject, email_body)
     if success:
-        logger.info(f"✅ Unconfirmed appointments email sent to {OWNER_EMAIL}")
+        logger.info(f"✅ Unconfirmed appointments email sent to {recipient}")
     else:
-        logger.error(f"❌ Failed to send unconfirmed appointments email")
+        logger.error(f"❌ Failed to send unconfirmed appointments email to {recipient}")
 
 
 # Scheduler instance
@@ -1577,7 +1658,7 @@ def _get_slots_for_date(date_str: str, biz_context: dict = None, parsed_date=Non
 
 def create_appointment(customer_phone: str, customer_name: str, service_type: str, date: str, time: str,
                        platform: str = "whatsapp", business_id: int = None, biz_context: dict = None,
-                       operator_name: str = None) -> Dict[str, Any]:
+                       operator_name: str = None, addon_operator_name: str = None) -> Dict[str, Any]:
     """Create a salon appointment"""
     try:
         # Normalize phone
@@ -1777,6 +1858,37 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                     "message": f"Sorry, {time} on {date} is already booked. Nearest available times: {', '.join(available_alternatives)}"
                 }
 
+            # Customer conflict check: prevent same phone from booking overlapping slots
+            if business_id is not None:
+                _req_dur_cust = service.get("duration", 60)
+                cur.execute(
+                    """SELECT id, treatment_name, appointment_time::text
+                       FROM appointments
+                       WHERE business_id = %s
+                         AND customer_phone = %s
+                         AND appointment_date = %s
+                         AND status = 'confirmed'
+                         AND appointment_time < (%s::time + (%s || ' minutes')::interval)
+                         AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
+                    (business_id, normalized_phone, date, time, _req_dur_cust, time)
+                )
+                _cust_conflict = cur.fetchone()
+                if _cust_conflict:
+                    _ex_time = str(_cust_conflict[2])[:5]
+                    return {
+                        "success": False,
+                        "error": "CUSTOMER_ALREADY_BOOKED",
+                        "existing_appointment_id": _cust_conflict[0],
+                        "existing_treatment": _cust_conflict[1],
+                        "existing_time": _ex_time,
+                        "date": date,
+                        "time": time,
+                        "message_it": (
+                            f"Hai già un appuntamento per {_cust_conflict[1]} "
+                            f"alle {_ex_time} in quella data."
+                        ),
+                    }
+
             # Create Google Calendar event first
             business = biz_context["business"] if biz_context else None
             google_event_id = create_calendar_event(
@@ -1851,12 +1963,40 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                             if main_op:
                                 logger.info(f"🔍 Main op {main_op['display_name']} treatments: {main_op.get('treatments', [])}, addon_code='{addon['code']}', match={addon['code'] in main_op.get('treatments', [])}")
                             if main_op and addon["code"] not in main_op.get("treatments", []):
-                                # Main operator can't do addon — find one who can and is free
-                                for op in addon_operators:
+                                # Main operator can't do addon — find one who can AND is free at addon_time.
+                                # Honor addon_operator_name preference if provided by the LLM.
+                                cur_check = conn.cursor()
+                                found_op_id = None
+                                found_op_name = None
+
+                                # Build candidate list: if customer specified an addon operator,
+                                # try that one first, then fall back to sort_order.
+                                preferred_name = (addon_operator_name or "").lower().strip()
+                                if preferred_name:
+                                    sorted_ops = sorted(
+                                        addon_operators,
+                                        key=lambda op: (0 if op["display_name"].lower() == preferred_name else 1)
+                                    )
+                                else:
+                                    sorted_ops = addon_operators
+
+                                for op in sorted_ops:
                                     if addon["code"] in op.get("treatments", []):
-                                        addon_op_id = op["id"]
-                                        addon_op_name = op["display_name"]
-                                        break
+                                        cur_check.execute(
+                                            """SELECT 1 FROM appointments
+                                               WHERE operator_id=%s AND appointment_date=%s
+                                               AND appointment_time=%s AND status='confirmed'""",
+                                            (op["id"], date, addon_time),
+                                        )
+                                        if not cur_check.fetchone():
+                                            found_op_id = op["id"]
+                                            found_op_name = op["display_name"]
+                                            break
+                                if not found_op_id:
+                                    logger.warning(f"⚠️ No free operator for addon '{addon['code']}' at {addon_time} — skipping addon")
+                                    raise Exception(f"no_free_addon_operator at {addon_time}")
+                                addon_op_id = found_op_id
+                                addon_op_name = found_op_name
                         addon_event_id = create_calendar_event(
                             customer_name=customer_name, service=addon_service,
                             date_str=date, time_str=addon_time,
@@ -1884,6 +2024,7 @@ def create_appointment(customer_phone: str, customer_name: str, service_type: st
                         result["auto_addon"] = {
                             "appointment_id": addon_appt_id,
                             "service": addon["name_it"],
+                            "operator_name": addon_op_name,
                             "time": addon_time,
                             "duration": addon["duration"],
                             "price": addon["price"],
@@ -1996,12 +2137,33 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
         try:
             cur = conn.cursor()
             if business_id is not None:
+                # Helper: is this day of week a working day for an operator?
+                def _op_works_on_date(op_obj: dict, check_date: str) -> bool:
+                    from datetime import datetime as _dt_w
+                    _dow = _dt_w.strptime(check_date, "%Y-%m-%d").weekday()
+                    _h = op_obj.get("hours", {}).get(_dow)
+                    if _h is None:
+                        return True  # no schedule data → assume working
+                    return bool(_h.get("is_working", True))
+
                 if operator_name and operators:
                     # Specific operator: check per-operator
                     op_result = resolve_operator(operator_name, "", operators)
                     if not op_result["success"]:
                         return {"success": False, **op_result}
                     op_id = op_result["operator_id"]
+                    # Check operator working day BEFORE querying DB
+                    _op_obj = next((o for o in operators if o["id"] == op_id), None)
+                    if _op_obj and not _op_works_on_date(_op_obj, date):
+                        return {
+                            "success": True,
+                            "available": False,
+                            "date": date,
+                            "time": time,
+                            "reason": "operator_day_off",
+                            "operator": _op_obj["display_name"],
+                            "message": f"{_op_obj['display_name']} non lavora quel giorno.",
+                        }
                     # Bug #4: interval overlap, not exact-time match
                     cur.execute(
                         """SELECT COUNT(*) FROM appointments
@@ -2014,20 +2176,51 @@ def check_availability(date: str, time: str, business_id: int = None, biz_contex
                     count = cur.fetchone()[0]
                     available = count == 0
                 elif operators and not operator_name:
-                    # No preference + operators exist: available if not ALL operators booked
+                    # No preference: only consider operators who work that day
+                    _working_ops = [op for op in operators if _op_works_on_date(op, date)]
+                    if not _working_ops:
+                        return {
+                            "success": True,
+                            "available": False,
+                            "date": date,
+                            "time": time,
+                            "reason": "no_operators_working",
+                            "message": "Nessun operatore è disponibile in quella giornata.",
+                        }
                     # Bug #4: count operators with overlapping appts
+                    _working_op_ids = [op["id"] for op in _working_ops]
+                    # Bug #G: only consider operators who can perform the requested service
+                    if treatment_code:
+                        _eligible_ops = [
+                            op for op in _working_ops
+                            if not op.get("treatments") or treatment_code in op.get("treatments", [])
+                        ]
+                        if not _eligible_ops:
+                            return {
+                                "success": True,
+                                "available": False,
+                                "date": date,
+                                "time": time,
+                                "reason": "no_operator_for_service",
+                                "message": "Nessun operatore disponibile per questo servizio in quella data.",
+                            }
+                        _eligible_ids = [op["id"] for op in _eligible_ops]
+                    else:
+                        _eligible_ops = _working_ops
+                        _eligible_ids = _working_op_ids
                     cur.execute(
                         """SELECT COUNT(DISTINCT operator_id) FROM appointments
-                           WHERE business_id = %s AND appointment_date = %s AND status = 'confirmed'
+                           WHERE business_id = %s AND operator_id = ANY(%s)
+                                 AND appointment_date = %s AND status = 'confirmed'
                                  AND appointment_time < (%s::time + (%s || ' minutes')::interval)
                                  AND (appointment_time + (COALESCE(duration_minutes, 60) || ' minutes')::interval) > %s::time""",
-                        (business_id, date, time, _req_duration, time)
+                        (business_id, _eligible_ids, date, time, _req_duration, time)
                     )
                     booked_count = cur.fetchone()[0]
-                    available = booked_count < len(operators)
+                    available = booked_count < len(_eligible_ops)
                     _no_pref_operator = None
                     if available:
-                        _op_ids = [op["id"] for op in operators]
+                        _op_ids = _eligible_ids
                         # Bug #4: NOT EXISTS interval overlap
                         cur.execute(
                             """SELECT o.id, o.display_name FROM operators o
@@ -2936,7 +3129,8 @@ def execute_function(function_name: str, arguments: str, phone: str,
                 platform=platform,
                 business_id=business_id,
                 biz_context=biz_context,
-                operator_name=args.get("operator_name")
+                operator_name=args.get("operator_name"),
+                addon_operator_name=args.get("addon_operator_name")
             )
 
         elif function_name == "check_availability":
@@ -3372,17 +3566,17 @@ def get_ai_response(phone: str, message: str, platform: str = "whatsapp", busine
 
             return response_text
 
-    except openai.RateLimitError as e:
+    except _OAIRateLimitError as e:
         logger.error(f"❌ Rate limit error: {e}")
         return ("We're experiencing high demand. Please try again in a moment. "
                 "/ Alto traffico, riprova tra qualche secondo. "
                 "Or call us at +39 02 8394 5621 / Oppure chiamaci.")
-    except openai.APITimeoutError as e:
+    except _OAITimeoutError as e:
         logger.error(f"❌ API timeout: {e}")
         return ("Connection slow, please try again. "
                 "/ Connessione lenta, riprova. "
                 "Or call us at +39 02 8394 5621 / Oppure chiamaci.")
-    except openai.APIConnectionError as e:
+    except _OAIConnectionError as e:
         logger.error(f"❌ API connection error: {e}")
         return ("Connection issue, please try again. "
                 "/ Problema di connessione, riprova. "
@@ -3493,16 +3687,27 @@ def split_message(message: str, max_length: int = 1000) -> List[str]:
     return chunks
 
 
-async def send_instagram_message(recipient_id: str, message: str) -> bool:
-    """Send Instagram DM via Graph API"""
-    if not INSTAGRAM_ACCESS_TOKEN:
+async def send_instagram_message(recipient_id: str, message: str, business: dict = None) -> bool:
+    """Send Instagram DM via Graph API — uses per-business token when available."""
+    token = (business or {}).get("instagram_access_token") or INSTAGRAM_ACCESS_TOKEN
+    ig_page_id = (business or {}).get("instagram_page_id") or INSTAGRAM_PAGE_ID
+
+    if not token:
         logger.error("[IG] No access token configured")
         return False
 
-    url = "https://graph.instagram.com/v21.0/me/messages"
+    # Instagram User Access Tokens (IGAAg...) must use graph.instagram.com/me/messages.
+    # Page Access Tokens use graph.facebook.com/{page_id}/messages.
+    # We detect by token prefix: IGAAG = User token, EAAg = Page token.
+    if token.startswith("IGAA") or token.startswith("IGAAg"):
+        url = "https://graph.instagram.com/v21.0/me/messages"
+    elif ig_page_id:
+        url = f"https://graph.facebook.com/v21.0/{ig_page_id}/messages"
+    else:
+        url = "https://graph.instagram.com/v21.0/me/messages"
 
     headers = {
-        "Authorization": f"Bearer {INSTAGRAM_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
@@ -3533,9 +3738,10 @@ async def send_instagram_message(recipient_id: str, message: str) -> bool:
     return success
 
 
-# Instagram message buffering (separate from WhatsApp, keyed by Instagram user IDs)
+# Instagram message buffering — keyed by Instagram user ID, stores biz_context alongside messages
 ig_pending_messages: Dict[str, List[Dict]] = {}
 ig_pending_timers: Dict[str, asyncio.Task] = {}
+ig_pending_biz_context: Dict[str, dict] = {}  # user_id → biz_context for buffered messages
 
 
 async def ig_process_buffered_messages(user_id: str):
@@ -3543,26 +3749,30 @@ async def ig_process_buffered_messages(user_id: str):
     try:
         messages = ig_pending_messages.pop(user_id, [])
         ig_pending_timers.pop(user_id, None)
+        biz_context = ig_pending_biz_context.pop(user_id, None)
 
         if not messages:
             return
 
+        business = (biz_context or {}).get("business", {})
+        biz_id = business.get("id")
         username = messages[0].get("username", "Cliente")
         combined_text = "\n".join(msg["text"] for msg in messages) if len(messages) > 1 else messages[0]["text"]
 
         logger.info(f"[IG] Timer fired for {user_id}. Processing {len(messages)} buffered message(s)")
 
-        response = get_ai_response(user_id, combined_text, platform="instagram")
-        save_conversation_to_db(user_id, username, combined_text, response, platform="instagram")
-        await send_instagram_message(user_id, response)
+        response = get_ai_response(user_id, combined_text, business_id=biz_id, biz_context=biz_context)
+        save_conversation_to_db(user_id, username, combined_text, response, business_id=biz_id, platform="instagram")
+        await send_instagram_message(user_id, response, business)
 
     except Exception as e:
         logger.error(f"[IG] Error processing buffered messages for {user_id}: {e}")
         ig_pending_messages.pop(user_id, None)
         ig_pending_timers.pop(user_id, None)
+        ig_pending_biz_context.pop(user_id, None)
 
 
-async def ig_handle_buffered_message(user_id: str, text: str, username: str):
+async def ig_handle_buffered_message(user_id: str, text: str, username: str, biz_context: dict = None):
     """Handle incoming Instagram message with batching"""
     if user_id not in ig_pending_messages:
         ig_pending_messages[user_id] = []
@@ -3572,6 +3782,10 @@ async def ig_handle_buffered_message(user_id: str, text: str, username: str):
         "username": username,
         "timestamp": datetime.now(ITALY_TZ).isoformat()
     })
+    # Always update biz_context so the last known context is used when timer fires
+    if biz_context:
+        ig_pending_biz_context[user_id] = biz_context
+
     logger.info(f"[IG] Buffered message for {user_id}. Buffer size: {len(ig_pending_messages[user_id])}")
 
     if user_id in ig_pending_timers:
@@ -3588,15 +3802,19 @@ async def ig_handle_buffered_message(user_id: str, text: str, username: str):
     logger.info(f"[IG] Started {MESSAGE_BATCH_DELAY_SECONDS}s timer for {user_id}")
 
 
-async def process_instagram_event(event: Dict[str, Any]):
-    """Process an Instagram messaging event"""
+async def process_instagram_event(event: Dict[str, Any], biz_context: dict = None):
+    """Process an Instagram messaging event — uses booking engine via biz_context."""
     try:
         sender_id = event.get("sender", {}).get("id")
         if not sender_id:
             return
 
-        # Ignore messages from ourselves (echo)
-        if sender_id == INSTAGRAM_PAGE_ID:
+        business = (biz_context or {}).get("business", {})
+        biz_id = business.get("id")
+        ig_page_id = business.get("instagram_page_id") or INSTAGRAM_PAGE_ID
+
+        # Ignore echoes from ourselves
+        if sender_id == ig_page_id:
             return
 
         message = event.get("message", {})
@@ -3608,8 +3826,9 @@ async def process_instagram_event(event: Dict[str, Any]):
 
         message_text = message.get("text")
         username = "Cliente"
+        biz_name = business.get("name", "Unknown") if business else "Unknown"
 
-        logger.info(f"[IG] Message from {sender_id}: {message_text[:100] if message_text else '(no text)'}...")
+        logger.info(f"[IG] [{biz_name}] Message from {sender_id}: {message_text[:100] if message_text else '(no text)'}...")
 
         if sender_id in chat_blocked:
             logger.info(f"[IG] Chat blocked for {sender_id}, ignoring message")
@@ -3617,11 +3836,11 @@ async def process_instagram_event(event: Dict[str, Any]):
 
         if message_text:
             if MESSAGE_BATCHING_ENABLED:
-                await ig_handle_buffered_message(sender_id, message_text, username)
+                await ig_handle_buffered_message(sender_id, message_text, username, biz_context)
             else:
-                response = get_ai_response(sender_id, message_text)
-                save_conversation_to_db(sender_id, username, message_text, response, platform="instagram")
-                await send_instagram_message(sender_id, response)
+                response = get_ai_response(sender_id, message_text, business_id=biz_id, biz_context=biz_context)
+                save_conversation_to_db(sender_id, username, message_text, response, business_id=biz_id, platform="instagram")
+                await send_instagram_message(sender_id, response, business)
 
         elif message.get("attachments"):
             attachments = message.get("attachments", [])
@@ -3635,7 +3854,7 @@ async def process_instagram_event(event: Dict[str, Any]):
                     f"L'utente Instagram {sender_id} ha inviato un'immagine.\nRichiede attenzione manuale."
                 )
                 await send_instagram_message(sender_id,
-                    "Abbiamo ricevuto la tua immagine. Ti rispondera presto un membro del nostro team.")
+                    "Abbiamo ricevuto la tua immagine. Ti rispondera presto un membro del nostro team.", business)
 
             elif attachment_type == "video":
                 send_alert_email(
@@ -3643,7 +3862,7 @@ async def process_instagram_event(event: Dict[str, Any]):
                     f"L'utente Instagram {sender_id} ha inviato un video.\nRichiede attenzione manuale."
                 )
                 await send_instagram_message(sender_id,
-                    "Abbiamo ricevuto il tuo video. Ti rispondera presto un membro del nostro team.")
+                    "Abbiamo ricevuto il tuo video. Ti rispondera presto un membro del nostro team.", business)
 
             elif attachment_type == "audio":
                 send_alert_email(
@@ -3652,7 +3871,7 @@ async def process_instagram_event(event: Dict[str, Any]):
                 )
                 await send_instagram_message(sender_id,
                     "Al momento non possiamo ascoltare i messaggi vocali. "
-                    "Se puoi, scrivici il tuo messaggio. Altrimenti ti rispondera presto un membro del nostro team.")
+                    "Se puoi, scrivici il tuo messaggio. Altrimenti ti rispondera presto un membro del nostro team.", business)
 
             elif attachment_type in ("sticker", "like_heart"):
                 logger.info(f"[IG] Sticker/reaction from {sender_id}. Ignored.")
@@ -3663,20 +3882,20 @@ async def process_instagram_event(event: Dict[str, Any]):
                     f"L'utente Instagram {sender_id} ci ha menzionato nella sua storia."
                 )
                 await send_instagram_message(sender_id,
-                    "Grazie per averci menzionato nella tua storia! Come possiamo aiutarti?")
+                    "Grazie per averci menzionato nella tua storia! Come possiamo aiutarti?", business)
 
             elif attachment_type == "story_reply":
                 story_reply_text = message.get("reply_to", {}).get("story", {}).get("text", "")
                 if story_reply_text:
-                    response = get_ai_response(sender_id, story_reply_text)
-                    save_conversation_to_db(sender_id, username, f"[Story reply] {story_reply_text}", response, platform="instagram")
-                    await send_instagram_message(sender_id, response)
+                    response = get_ai_response(sender_id, story_reply_text, business_id=biz_id, biz_context=biz_context)
+                    save_conversation_to_db(sender_id, username, f"[Story reply] {story_reply_text}", response, business_id=biz_id, platform="instagram")
+                    await send_instagram_message(sender_id, response, business)
                 else:
                     await send_instagram_message(sender_id,
-                        "Grazie per la risposta alla nostra storia! Come possiamo aiutarti?")
+                        "Grazie per la risposta alla nostra storia! Come possiamo aiutarti?", business)
             else:
                 await send_instagram_message(sender_id,
-                    "Posso rispondere solo a messaggi di testo. Come posso aiutarti?")
+                    "Posso rispondere solo a messaggi di testo. Come posso aiutarti?", business)
 
         elif event.get("reaction"):
             logger.info(f"[IG] Reaction from {sender_id}. Ignored.")
@@ -3790,6 +4009,8 @@ async def startup():
     """Initialize on startup"""
     initialize_database()
     setup_reminder_scheduler()
+    # Durable human-takeover store (survives restarts). Falls back to in-memory.
+    chatwoot_bridge.init_takeover_store(get_db_connection)
     logger.info(f"🚀 {BUSINESS_NAME} WhatsApp + Instagram Bot started!")
 
 @app.get("/webhook")
@@ -3804,6 +4025,55 @@ async def verify_webhook(request: Request):
         return PlainTextResponse(challenge)
 
     return PlainTextResponse("Failed", status_code=403)
+
+@app.post("/webhook/chatwoot")
+async def chatwoot_webhook(request: Request):
+    """Inbound Chatwoot events: deliver human-agent replies to the customer over
+    WhatsApp and toggle the AI-suspend (human takeover) flag.
+
+    Auth: Chatwoot custom webhooks cannot add headers, so the shared secret is
+    passed as ?token=... in the configured webhook URL.
+    """
+    # --- authenticate (fail closed) ---
+    if not CHATWOOT_WEBHOOK_SECRET:
+        logger.error("CHATWOOT_WEBHOOK_SECRET not configured — rejecting webhook")
+        return JSONResponse({"status": "not_configured"}, status_code=503)
+    token = request.query_params.get("token", "")
+    if not hmac.compare_digest(token, CHATWOOT_WEBHOOK_SECRET):
+        return JSONResponse({"status": "forbidden"}, status_code=403)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"status": "bad_request"}, status_code=400)
+
+    decision = chatwoot_bridge.classify_webhook_event(payload)
+    action = decision.get("action")
+
+    if action == "forward":
+        phone = decision["phone"]
+        content = decision["content"]
+        chatwoot_bridge.mark_human_takeover(phone)
+        await send_whatsapp_message(phone, content)
+        logger.info(f"➡️ Forwarded agent reply to {phone} (takeover ON)")
+        return JSONResponse({"status": "forwarded"})
+
+    if action == "set_takeover":
+        phone = decision.get("phone")
+        if phone:
+            chatwoot_bridge.mark_human_takeover(phone)
+            logger.info(f"🏷️ bot_paused label detected — takeover ON for {phone}")
+        return JSONResponse({"status": "takeover_set"})
+
+    if action == "clear_takeover":
+        phone = decision.get("phone")
+        if phone:
+            chatwoot_bridge.clear_human_takeover(phone)
+            logger.info(f"✅ Conversation resolved — takeover OFF for {phone}")
+        return JSONResponse({"status": "takeover_cleared"})
+
+    return JSONResponse({"status": "ignored", "reason": decision.get("reason")})
+
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -3889,10 +4159,30 @@ async def instagram_webhook(request: Request):
             return JSONResponse({"status": "ignored"})
 
         for entry in body.get("entry", []):
-            messaging_events = entry.get("messaging", [])
+            # entry["id"] is the Instagram Business Account ID — route to the right tenant
+            ig_page_id = str(entry.get("id", ""))
+            biz_context = None
+            if ig_page_id:
+                try:
+                    business = load_business_by_instagram_page_id(ig_page_id)
+                    biz_context = {
+                        "business": business,
+                        "services": load_services(business["id"]),
+                        "hours": load_business_hours(business["id"]),
+                        "closures": load_closures(business["id"]),
+                        "operators": load_operators(business["id"]),
+                        "faqs": load_faqs(business["id"]),
+                    }
+                except BusinessNotFoundError:
+                    logger.warning(f"[IG] No active business for instagram_page_id={ig_page_id} — skipping entry")
+                    continue
+                except Exception as e:
+                    logger.error(f"[IG] DB lookup error for page_id={ig_page_id}: {e}")
+                    continue
 
+            messaging_events = entry.get("messaging", [])
             for event in messaging_events:
-                await process_instagram_event(event)
+                await process_instagram_event(event, biz_context)
 
         return JSONResponse({"status": "processed"})
 
@@ -3924,6 +4214,23 @@ async def process_message(message: Dict[str, Any], value: Dict[str, Any], biz_co
         if phone in chat_blocked:
             logger.info(f"🔒 Chat blocked for {phone}, ignoring message")
             return  # Don't respond to blocked chats
+
+        # Human takeover: an agent is handling this chat in Chatwoot -> suspend the
+        # AI for every reply path below. Still mirror the customer's message so the
+        # agent sees it in the dashboard.
+        if chatwoot_bridge.has_human_takeover(phone):
+            if message_type == "text":
+                mirror_text = message.get("text", {}).get("body", "")
+            elif message_type == "interactive":
+                interactive = message.get("interactive", {})
+                mirror_text = (interactive.get("button_reply", {}).get("title", "")
+                               or interactive.get("list_reply", {}).get("title", ""))
+            else:
+                mirror_text = f"[{message_type} message]"
+            if mirror_text:
+                await _chatwoot_push("in", phone, mirror_text, contact_name)
+            logger.info(f"🙋 Human takeover active for {phone} — AI suspended")
+            return
 
         if message_type == "text":
             text = message.get("text", {}).get("body", "")

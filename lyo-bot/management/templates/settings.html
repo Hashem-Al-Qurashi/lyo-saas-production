@@ -1,0 +1,369 @@
+{% extends "base.html" %}
+{% block title %}Impostazioni - Lyo Virtual Assistant{% endblock %}
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-2xl font-bold text-gray-900 tracking-tight">Impostazioni</h1>
+    <p class="text-sm text-gray-500 mt-1">Configura le impostazioni del bot e della tua attivita</p>
+</div>
+
+{% if business %}
+<form method="post" action="/manage/settings/save" class="space-y-6">
+    <!-- Bot & Business Settings -->
+    <div class="card">
+        <div class="flex items-center gap-3 mb-5">
+            <div class="w-8 h-8 bg-brand-light rounded-lg flex items-center justify-center">
+                <svg class="w-4 h-4 text-brand" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+            </div>
+            <h2 class="text-base font-semibold text-gray-900">Bot e Attivita</h2>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Nome Bot</label>
+                <input type="text" name="bot_name" value="{{ business.bot_name or 'Assistente' }}" class="form-input">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Fuso Orario</label>
+                <input type="text" name="timezone" value="{{ business.timezone or 'Europe/Rome' }}" class="form-input">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Lingua</label>
+                <select name="language" class="form-input">
+                    <option value="it" {% if business.language == 'it' %}selected{% endif %}>Italiano</option>
+                    <option value="en" {% if business.language == 'en' %}selected{% endif %}>English</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Email Proprietario</label>
+                <input type="email" name="owner_email" value="{{ business.owner_email or '' }}" class="form-input">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Indirizzo</label>
+                <input type="text" name="address" value="{{ business.address or '' }}" class="form-input">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Telefono</label>
+                <input type="text" name="phone" value="{{ business.phone or '' }}" class="form-input">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1.5">Email Attivita</label>
+                <input type="email" name="email" value="{{ business.email or '' }}" class="form-input">
+            </div>
+        </div>
+    </div>
+
+    <!-- WhatsApp Configuration -->
+    <div class="card">
+        <div class="flex items-center gap-3 mb-5">
+            <div class="w-8 h-8 bg-green-50 rounded-lg flex items-center justify-center">
+                <svg class="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+            </div>
+            <h2 class="text-base font-semibold text-gray-900">WhatsApp</h2>
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1.5">Numero WhatsApp Business</label>
+            <input type="text" name="whatsapp_phone" value="{{ business.whatsapp_phone or '' }}" placeholder="+39 333 1234567" class="form-input">
+            <p class="mt-1.5 text-xs text-gray-400">Il numero associato al tuo account WhatsApp Business</p>
+        </div>
+    </div>
+
+    <!-- WhatsApp Business API Connection -->
+    <div class="card">
+        <div class="flex items-center gap-3 mb-5">
+            <div class="w-8 h-8 bg-green-50 rounded-lg flex items-center justify-center">
+                <svg class="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
+            </div>
+            <h2 class="text-base font-semibold text-gray-900">Connessione WhatsApp Business</h2>
+        </div>
+        <div id="wa-status">
+            <p class="text-gray-500 text-sm mb-4">Collega il tuo numero WhatsApp Business per attivare il bot.</p>
+            <button id="wa-connect-btn" type="button" class="inline-flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-xl hover:bg-green-700 font-medium text-sm transition-colors shadow-sm">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
+                Collega WhatsApp
+            </button>
+        </div>
+    </div>
+
+    <!-- Instagram Connection -->
+    <div class="border-t pt-5">
+        <h2 class="text-base font-semibold text-gray-900 mb-1">Connessione Instagram</h2>
+        <p class="text-gray-500 text-sm mb-4">Collega il tuo account Instagram Professional per ricevere e rispondere ai DM.</p>
+        <div id="ig-status">
+            <button id="ig-connect-btn" type="button" class="inline-flex items-center gap-2 bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 rounded-xl hover:opacity-90 font-medium text-sm transition-opacity shadow-sm">
+                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z"/></svg>
+                Collega Instagram
+            </button>
+        </div>
+    </div>
+
+    <div class="pt-2">
+        <button type="submit" class="btn-primary">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            Salva Impostazioni
+        </button>
+    </div>
+</form>
+{% else %}
+<div class="card">
+    <div class="flex items-center gap-3 bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-xl">
+        <svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+        Business non trovato.
+    </div>
+</div>
+{% endif %}
+
+<script>
+// ── WhatsApp status check ──────────────────────────────────────────────────
+var _waStatusCsrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
+fetch('/manage/api/whatsapp/status')
+    .then(r => r.json())
+    .then(data => {
+        if (!data.connected) return;
+        var expiring = data.days_until_expiry !== null && data.days_until_expiry < 7;
+        var expiryBadge = expiring
+            ? '<div class="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg">' +
+              '<svg class="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
+              '<p class="text-amber-700 text-xs font-medium">Token scade in ' + data.days_until_expiry + ' giorni — riconnetti WhatsApp.</p></div>'
+            : '';
+        document.getElementById('wa-status').innerHTML =
+            '<div class="bg-green-50 border border-green-200 px-4 py-3 rounded-xl">' +
+            '<div class="flex items-center gap-3">' +
+            '<svg class="w-5 h-5 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+            '<div class="flex-1">' +
+            '<p class="text-green-700 font-medium text-sm">WhatsApp collegato</p>' +
+            '<p class="text-green-600 text-xs">Numero ID: ' + data.phone_number_id + '</p>' +
+            '</div>' +
+            '<button id="wa-disconnect-btn" class="text-xs text-red-500 hover:text-red-700 font-medium underline">Disconnetti</button>' +
+            '</div>' +
+            expiryBadge +
+            '</div>';
+        document.getElementById('wa-disconnect-btn').addEventListener('click', function() {
+            if (!confirm('Disconnettere WhatsApp? Il bot smetterà di rispondere finché non riconnetti.')) return;
+            fetch('/manage/api/whatsapp/disconnect', {
+                method: 'POST',
+                headers: {'X-CSRF-Token': _waStatusCsrf},
+            }).then(function() { location.reload(); });
+        });
+    })
+    .catch(() => {});
+
+// ── Meta Embedded Signup ──────────────────────────────────────────────────
+{% if meta_app_id %}
+// Load Facebook SDK
+window.fbAsyncInit = function() {
+    FB.init({ appId: '{{ meta_app_id }}', version: 'v19.0', xfbml: false, cookie: false });
+};
+(function(d, s, id) {
+    var js, fjs = d.getElementsByTagName(s)[0];
+    if (d.getElementById(id)) return;
+    js = d.createElement(s); js.id = id;
+    js.src = 'https://connect.facebook.net/en_US/sdk.js';
+    fjs.parentNode.insertBefore(js, fjs);
+}(document, 'script', 'facebook-jssdk'));
+
+document.getElementById('wa-connect-btn').addEventListener('click', function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Connessione…';
+
+    // Promise that resolves once Meta's popup sends phone_number_id + waba_id via postMessage.
+    // FB.login callback fires synchronously after popup closes; postMessage arrives later in the
+    // event queue. We must wait for it before POSTing, otherwise we'd send empty strings to DB.
+    // Timeout after 10s: if user cancels mid-flow and FINISH never fires, re-enable the button.
+    var waDataPromise = new Promise(function(resolve, reject) {
+        var timer = setTimeout(function() {
+            window.removeEventListener('message', handler);
+            reject(new Error('timeout'));
+        }, 10000);
+        function handler(event) {
+            if (event.origin !== 'https://www.facebook.com') return;
+            try {
+                var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+                if (data.type === 'WA_EMBEDDED_SIGNUP' && data.event === 'FINISH') {
+                    clearTimeout(timer);
+                    window.removeEventListener('message', handler);
+                    resolve({
+                        phone_number_id: (data.data && data.data.phone_number_id) || '',
+                        waba_id: (data.data && data.data.waba_id) || '',
+                    });
+                }
+            } catch(e) {}
+        }
+        window.addEventListener('message', handler);
+    });
+
+    FB.login(function(response) {
+        if (!response.authResponse) {
+            btn.disabled = false;
+            btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg> Collega WhatsApp';
+            return;
+        }
+
+        var token = response.authResponse.code || response.authResponse.accessToken;
+
+        // Get CSRF token from meta tag (injected by CSRFMiddleware)
+        var csrfToken = document.querySelector('meta[name="csrf-token"]');
+        csrfToken = csrfToken ? csrfToken.getAttribute('content') : '';
+
+        waDataPromise.then(function(waData) {
+            return fetch('/manage/api/whatsapp/callback', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrfToken,
+                },
+                body: JSON.stringify({
+                    phone_number_id: waData.phone_number_id,
+                    waba_id: waData.waba_id,
+                    access_token: token,
+                }),
+            });
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.status === 'connected') {
+                document.getElementById('wa-status').innerHTML =
+                    '<div class="flex items-center gap-3 bg-green-50 border border-green-200 px-4 py-3 rounded-xl">' +
+                    '<svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+                    '<div><p class="text-green-700 font-medium text-sm">WhatsApp collegato</p>' +
+                    '<p class="text-green-600 text-xs">Numero ID: ' + data.phone_number_id + '</p></div>' +
+                    '</div>';
+                if (typeof showToast === 'function') showToast('WhatsApp collegato con successo!', 'success');
+            } else {
+                if (typeof showToast === 'function') showToast('Errore: ' + (data.error || 'riprova'), 'error');
+                btn.disabled = false;
+                btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg> Collega WhatsApp';
+            }
+        })
+        .catch(function(err) {
+            var msg = (err && err.message === 'timeout') ? 'Connessione annullata.' : 'Errore di rete, riprova.';
+            if (typeof showToast === 'function') showToast(msg, 'error');
+            btn.disabled = false;
+            btn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg> Collega WhatsApp';
+        });
+    }, {
+        scope: 'whatsapp_business_management,whatsapp_business_messaging',
+        response_type: 'code',
+        extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
+    });
+});
+{% else %}
+document.getElementById('wa-connect-btn').addEventListener('click', function() {
+    alert('Configurazione Meta non ancora attiva. Contatta il supporto Lyo.');
+});
+{% endif %}
+
+// ── Instagram status check ─────────────────────────────────────────────────
+var _igStatusCsrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
+fetch('/manage/api/instagram/status')
+    .then(r => r.json())
+    .then(data => {
+        if (!data.connected) return;
+        var expiring = data.days_until_expiry !== null && data.days_until_expiry < 7;
+        var expiryBadge = expiring
+            ? '<div class="mt-2 flex items-center gap-2 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg">' +
+              '<svg class="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' +
+              '<p class="text-amber-700 text-xs font-medium">Token scade in ' + data.days_until_expiry + ' giorni — riconnetti Instagram.</p></div>'
+            : '';
+        document.getElementById('ig-status').innerHTML =
+            '<div class="bg-purple-50 border border-purple-200 px-4 py-3 rounded-xl">' +
+            '<div class="flex items-center gap-3">' +
+            '<svg class="w-5 h-5 text-purple-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+            '<div class="flex-1">' +
+            '<p class="text-purple-700 font-medium text-sm">Instagram collegato</p>' +
+            '<p class="text-purple-600 text-xs">Page ID: ' + data.instagram_page_id + '</p>' +
+            '</div>' +
+            '<button id="ig-disconnect-btn" class="text-xs text-red-500 hover:text-red-700 font-medium underline">Disconnetti</button>' +
+            '</div>' + expiryBadge + '</div>';
+        document.getElementById('ig-disconnect-btn').addEventListener('click', function() {
+            if (!confirm('Disconnettere Instagram? Il bot smetterà di rispondere ai DM.')) return;
+            fetch('/manage/api/instagram/disconnect', {
+                method: 'POST',
+                headers: {'X-CSRF-Token': _igStatusCsrf},
+            }).then(function() { location.reload(); });
+        });
+    })
+    .catch(() => {});
+
+// ── Instagram FB Login flow ────────────────────────────────────────────────
+{% if meta_app_id %}
+document.getElementById('ig-connect-btn').addEventListener('click', function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Connessione…';
+
+    var csrfToken = (document.querySelector('meta[name="csrf-token"]') || {}).getAttribute('content') || '';
+
+    // FB Login requesting Instagram permissions
+    FB.login(function(response) {
+        if (!response.authResponse) {
+            btn.disabled = false;
+            btn.textContent = 'Collega Instagram';
+            return;
+        }
+
+        var token = response.authResponse.accessToken;
+
+        // Fetch IG Business Account ID from Graph API using the page token
+        FB.api('/me/accounts', { access_token: token }, function(pages) {
+            if (!pages || !pages.data || pages.data.length === 0) {
+                if (typeof showToast === 'function') showToast('Nessuna pagina Facebook trovata. Collega una pagina al tuo account Instagram Professional.', 'error');
+                btn.disabled = false;
+                btn.textContent = 'Collega Instagram';
+                return;
+            }
+
+            // Use first page that has an instagram_business_account
+            var page = pages.data[0];
+            var pageToken = page.access_token;
+
+            FB.api('/' + page.id + '?fields=instagram_business_account', { access_token: pageToken }, function(pageData) {
+                var igAccountId = pageData && pageData.instagram_business_account && pageData.instagram_business_account.id;
+                if (!igAccountId) {
+                    if (typeof showToast === 'function') showToast('Nessun account Instagram Professional collegato a questa pagina.', 'error');
+                    btn.disabled = false;
+                    btn.textContent = 'Collega Instagram';
+                    return;
+                }
+
+                fetch('/manage/api/instagram/callback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                    body: JSON.stringify({ instagram_page_id: igAccountId, access_token: pageToken }),
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.status === 'connected') {
+                        document.getElementById('ig-status').innerHTML =
+                            '<div class="flex items-center gap-3 bg-purple-50 border border-purple-200 px-4 py-3 rounded-xl">' +
+                            '<svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+                            '<div><p class="text-purple-700 font-medium text-sm">Instagram collegato</p>' +
+                            '<p class="text-purple-600 text-xs">Page ID: ' + data.instagram_page_id + '</p></div>' +
+                            '</div>';
+                        if (typeof showToast === 'function') showToast('Instagram collegato con successo!', 'success');
+                    } else {
+                        if (typeof showToast === 'function') showToast('Errore: ' + (data.error || 'riprova'), 'error');
+                        btn.disabled = false;
+                        btn.textContent = 'Collega Instagram';
+                    }
+                })
+                .catch(function() {
+                    if (typeof showToast === 'function') showToast('Errore di rete, riprova.', 'error');
+                    btn.disabled = false;
+                    btn.textContent = 'Collega Instagram';
+                });
+            });
+        });
+    }, {
+        scope: 'instagram_basic,instagram_manage_messages,pages_show_list,pages_read_engagement,pages_messaging',
+        return_scopes: true,
+    });
+});
+{% else %}
+document.getElementById('ig-connect-btn').addEventListener('click', function() {
+    alert('Configurazione Meta non ancora attiva. Contatta il supporto Lyo.');
+});
+{% endif %}
+</script>
+{% endblock %}

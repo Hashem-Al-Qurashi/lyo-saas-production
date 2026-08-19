@@ -1,0 +1,22 @@
+version: '3'
+services:
+  rails:
+    environment:
+      - SMTP_ADDRESS=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USERNAME=notifiche.lyo@gmail.com
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_AUTHENTICATION=plain
+      - SMTP_ENABLE_STARTTLS_AUTO=true
+      - SMTP_DOMAIN=gmail.com
+      - MAILER_SENDER_EMAIL=Lyo <notifiche.lyo@gmail.com>
+  sidekiq:
+    environment:
+      - SMTP_ADDRESS=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USERNAME=notifiche.lyo@gmail.com
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - SMTP_AUTHENTICATION=plain
+      - SMTP_ENABLE_STARTTLS_AUTO=true
+      - SMTP_DOMAIN=gmail.com
+      - MAILER_SENDER_EMAIL=Lyo <notifiche.lyo@gmail.com>

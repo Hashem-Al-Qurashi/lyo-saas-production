@@ -1,0 +1,17 @@
+[Unit]
+Description=Lyo Management App
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/lyo-bot
+EnvironmentFile=/home/ec2-user/.env
+ExecStart=/usr/local/bin/python3.11 -m uvicorn management.app:mgmt_app --host 127.0.0.1 --port 8002
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
